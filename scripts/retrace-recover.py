@@ -23,6 +23,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
+from retrace_paths import configure_utf8_stdio, encode_path, get_platform, iter_session_files
+
+configure_utf8_stdio()
+
 VERSION = "1.0.0"
 
 
@@ -245,8 +249,19 @@ def save_versions(versions: List[Dict], target_file: str, output_dir: Path):
     return len(versions)
 
 
-def find_session_file(session_uuid: str, project_dir: Path) -> Optional[Path]:
+def find_session_file(session_uuid: str, project_dir: Path, platform: str = "codex") -> Optional[Path]:
     """查找会话文件"""
+    for f in iter_session_files(platform):
+        if session_uuid in f.name:
+            return f
+        try:
+            with open(f, "r", encoding="utf-8") as handle:
+                first = json.loads(handle.readline())
+            payload = first.get("payload", {})
+            if first.get("type") == "session_meta" and payload.get("id") == session_uuid:
+                return f
+        except Exception:
+            pass
     # 直接匹配 UUID
     for f in project_dir.glob('*.jsonl'):
         if session_uuid in f.name:
@@ -262,19 +277,21 @@ def main():
     parser.add_argument("--session", required=True, help="会话 UUID")
     parser.add_argument("--file", required=True, help="目标文件路径")
     parser.add_argument("--project", help="项目目录名 (默认: 从当前目录推断)")
+    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+                        help="会话平台")
     parser.add_argument("--output", required=True, help="输出目录")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     args = parser.parse_args()
 
     # 查找项目目录
-    projects_dir = Path.home() / ".claude" / "projects"
+    projects_dir = get_platform(args.platform).projects_dir
 
     if args.project:
         project_dir = projects_dir / args.project
         if not project_dir.exists():
             # 尝试编码路径
-            encoded = args.project.replace(':', '-').replace('\\', '-')
+            encoded = encode_path(args.project)
             project_dir = projects_dir / encoded
 
     # 如果未指定项目，从当前工作目录推断
@@ -284,7 +301,7 @@ def main():
         project_dir = projects_dir / project_name
 
         if not project_dir.exists():
-            encoded = cwd.drive[0] + '-' + str(cwd).replace(':', '-').replace('\\', '-')
+            encoded = encode_path(str(cwd))
             project_dir = projects_dir / encoded
 
     if not project_dir.exists():
@@ -293,7 +310,7 @@ def main():
         sys.exit(1)
 
     # 查找会话文件
-    session_file = find_session_file(args.session, project_dir)
+    session_file = find_session_file(args.session, project_dir, args.platform)
     if not session_file:
         print(f"❌ 会话文件不存在: {args.session}", file=sys.stderr)
         sys.exit(1)

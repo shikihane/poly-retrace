@@ -1,160 +1,110 @@
 ---
 name: Retrace
 description: This skill should be used when the user asks to "find past conversations", "recall what was done", "search history", "look up previous work", "how did we handle X", "what was that implementation", "find similar code", "search session", "analyze conversation history", "recover file", "restore previous version", or mentions terms like "earlier", "before", "previously", "last time", "history", "past work".
-version: 0.2.0
+version: 0.3.0
 ---
 
-# Retrace - Claude Code Session History Search
+# Retrace - Codex and Claude Code Session History Search
 
-Search and analyze Claude Code conversation history using FTS5 full-text search with BM25 ranking.
-
-## When to Use This Skill
-
-Use retrace when the user asks about:
-- Past conversations, previous work, or earlier implementations
-- How a specific feature or bug was handled before
-- Finding similar implementations or code patterns
-- Recovering code that was damaged without git record
-- Extracting session chronicles or history summaries
+Search and analyze Codex or Claude Code conversation history using SQLite FTS full-text search with BM25 ranking.
 
 ## Architecture
 
-- **Per-project databases**: Each project has its own index at `~/.claude/projects/<project>/retrace-index.db`
-- **Session isolation**: Sessions table with metadata and summaries
-- **Shared module**: `retrace_common.py` for common utilities
+- Codex sessions: `$env:CODEX_HOME\sessions\**\*.jsonl` and `$env:CODEX_HOME\archived_sessions\*.jsonl`; default home is `$HOME\.codex`.
+- Codex indexes: `$env:CODEX_HOME\projects\<encoded-cwd>\retrace-index.db`.
+- Claude Code sessions and indexes: `$env:CLAUDE_HOME\projects\<encoded-cwd>\*.jsonl` and `retrace-index.db`; default home is `$HOME\.claude`.
+- Platform selection is mandatory: pass `--platform codex` or `--platform claude`.
+- Windows-first shell: use PowerShell 7 (`pwsh`) examples and commands.
+- Platform modules: `platforms/codex.py` and `platforms/claude.py` own platform-specific paths; `platforms/common.py` holds the shared data model.
+- Compatibility facade: `retrace_paths.py` exposes the small public API used by scripts.
 
 ## Core Workflow
 
-1. **Ensure index exists** before searching
-2. **List sessions** to find relevant session IDs
-3. **Search with layered output** (stats → list → detail → full)
-4. **Use chronicle** for single-session history extraction
-5. **Use recover** for file version restoration
+1. Set script and Python variables in PowerShell 7.
+2. Ensure the project index exists before searching.
+3. Search with layered output: `stats`, `list`, then `detail`.
+4. Use `chronicle` for single-session history extraction.
+5. Use `recover` for file version restoration.
 
-## Quick Reference
+## PowerShell Setup
 
-### Ensure Index Exists
-
-```bash
-RETRACE_SCRIPTS="<plugin-path>/scripts"
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --project <project>
+```powershell
+$env:RETRACE_SCRIPTS = "D:\Projects\poly-retrace\scripts"
+$PYTHON_CMD = "python"
 ```
 
-### List Sessions
+## Ensure Index Exists
 
-```bash
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --list-sessions --project <project>
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --list-sessions --project <project> --json
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 ```
 
-### Search Sessions
+Use `--no-summary` for normal local use. Summary and analysis commands call `codex exec`, which is slower and spends model calls.
 
-```bash
-# Basic search
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query" --project <project>
+## List Sessions
 
-# With filters
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "bug" --type tool_result --tool Edit --project <project>
-
-# Get context around a message
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --context <id> --before 5 --after 5
-
-# Statistics only
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query" --level stats --project <project>
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --list-sessions --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude --list-sessions --project poly-retrace --json
 ```
 
-### AI-Powered Analysis
+## Search Sessions
 
-```bash
-# Search and analyze (auto-chunks if data > 100KB)
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-analyze.py" "error" --prompt "classify error types" --project <project>
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-analyze.py" "query" --prompt "summarize" --json
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "query" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "error" --level stats --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 ```
 
-### Session Chronicle
+## AI-Powered Analysis
 
-```bash
-# Extract all events from a session (TOON format)
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-chronicle.py" --session <uuid> --project <project>
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-chronicle.py" --file <path> --json
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "classify error types" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "query" --prompt "summarize" --json
 ```
 
-### File Recovery
+## Session Chronicle
 
-```bash
-# Recover file versions from session
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-recover.py" --session <uuid> --project <project> --file <path> --output ./recovery
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+```
+
+## File Recovery
+
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" --platform codex --session <uuid> --project poly-retrace --file "scripts\retrace-index.py" --output .\recovery
 ```
 
 ## Search Levels
 
 | Level | Output | Token Cost |
 |-------|--------|------------|
-| `stats` | Counts, distributions | ~50 |
+| `stats` | Counts and distributions | ~50 |
 | `list` | ID, timestamp, preview | ~500 |
 | `detail` | Full preview, file location | ~2000 |
 | `full` | Complete message | Variable |
 
-**Default workflow**: stats → list → detail → full
+Default workflow: `stats` -> `list` -> `detail` -> `full`.
 
 ## Filter Options
 
 | Filter | Example |
 |--------|---------|
-| `--type` | `tool_result`, `user`, `assistant` |
-| `--role` | `user`, `assistant` |
-| `--tool` | `Bash`, `Edit`, `Read` |
-| `--project` | Project name (partial match) |
+| `--type` | `tool_result`, `tool_use`, `user`, `assistant` |
+| `--role` | `user`, `assistant`, `tool` |
+| `--tool` | `shell_command`, `apply_patch`, `Read` |
+| `--project` | Project name or encoded path fragment |
 | `--session` | Session UUID |
 | `--since` | Start date (ISO) |
 | `--until` | End date (ISO) |
 
-## Index Management
-
-```bash
-# Build/update all project indexes
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto
-
-# Rebuild from scratch
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --no-incremental
-
-# View statistics
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --stats
-```
-
 ## Red Flags - Use Retrace
 
-Stop and search retrace when thinking:
-- "What did we do before?" → Search first
-- "Similar implementation?" → Find existing code
-- "Code was modified without git" → Use recover
-- "Need to restore previous version" → Use recover
-- "This seems familiar" → Search for it
-
-## Script Reference
-
-| Script | Purpose |
-|--------|---------|
-| `retrace-index.py` | Build/update FTS5 index |
-| `retrace-search.py` | Search with layered output |
-| `retrace-analyze.py` | AI-powered analysis |
-| `retrace-chronicle.py` | Session history extraction |
-| `retrace-recover.py` | File version recovery |
-
-## Additional Resources
-
-### Reference Files
-
-- **`references/architecture.md`** - Detailed architecture and data storage
-- **`references/chronicle-format.md`** - TOON format specification for chronicle output
-- **`references/recover-guide.md`** - File recovery guide and data source trust levels
-
-### Example Files
-
-- **`examples/search-examples.sh`** - Common search patterns
-- **`examples/chronicle-examples.sh`** - Chronicle usage examples
-- **`examples/recover-examples.sh`** - Recovery workflow examples
-
-### Scripts
-
-- **`scripts/validate-skill.sh`** - Validate skill structure and configuration
+- "What did we do before?" -> search first.
+- "Similar implementation?" -> find existing code.
+- "Code was modified without git" -> use recover.
+- "Need to restore previous version" -> use recover.
+- "This seems familiar" -> search for it.

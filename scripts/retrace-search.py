@@ -27,19 +27,38 @@ import sqlite3
 import os
 import sys
 import argparse
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
+from retrace_paths import configure_utf8_stdio, get_platform, get_platforms
+
+configure_utf8_stdio()
+
 VERSION = "2.0.0"
 
 
+def prepare_fts_query(query: str) -> str:
+    """Escape plain text that would otherwise be parsed as FTS syntax."""
+    if not query:
+        return query
+    stripped = query.strip()
+    if stripped.startswith('"') and stripped.endswith('"'):
+        return stripped
+    if re.fullmatch(r"[\w\s]+", stripped, flags=re.UNICODE):
+        return stripped
+    escaped = stripped.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def get_claude_dir() -> Path:
-    return Path.home() / ".claude"
+    """兼容旧名称：返回 Codex 主目录。"""
+    return get_platform("codex").home_dir
 
 
-def get_projects_dir() -> Path:
-    return get_claude_dir() / "projects"
+def get_projects_dir(platform: str = "codex") -> Path:
+    return get_platform(platform).projects_dir
 
 
 def get_project_db_path(project_dir: Path) -> Path:
@@ -47,9 +66,9 @@ def get_project_db_path(project_dir: Path) -> Path:
     return project_dir / "retrace-index.db"
 
 
-def find_all_project_dbs() -> List[Path]:
+def find_all_project_dbs(platform: str = "codex") -> List[Path]:
     """找到所有项目的索引数据库"""
-    projects_dir = get_projects_dir()
+    projects_dir = get_projects_dir(platform)
     if not projects_dir.exists():
         return []
 
@@ -62,9 +81,9 @@ def find_all_project_dbs() -> List[Path]:
     return dbs
 
 
-def get_project_db_paths(project: str) -> List[Path]:
+def get_project_db_paths(project: str, platform: str = "codex") -> List[Path]:
     """获取项目及其 worktrees 的所有数据库路径"""
-    projects_dir = get_projects_dir()
+    projects_dir = get_projects_dir(platform)
     if not projects_dir.exists():
         return []
 
@@ -91,22 +110,22 @@ def get_project_db_paths(project: str) -> List[Path]:
     return dbs
 
 
-def get_default_db_path(project: str = None) -> Optional[Path]:
+def get_default_db_path(project: str = None, platform: str = "codex") -> Optional[Path]:
     """获取数据库路径（支持项目过滤）"""
-    projects_dir = get_projects_dir()
+    projects_dir = get_projects_dir(platform)
     if not projects_dir.exists():
         return None
 
     if project:
         # 使用新函数获取所有匹配的数据库（主项目 + worktrees）
-        dbs = get_project_db_paths(project)
+        dbs = get_project_db_paths(project, platform)
         if not dbs:
             return None
         # 返回第一个数据库（保持向后兼容）
         return dbs[0]
 
     # 返回最新修改的数据库
-    dbs = find_all_project_dbs()
+    dbs = find_all_project_dbs(platform)
     if not dbs:
         return None
     return max(dbs, key=lambda p: p.stat().st_mtime)
@@ -125,7 +144,7 @@ def search_stats(conn: sqlite3.Connection, query: str = None,
 
     if query:
         conditions.append("id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
-        params.append(query)
+        params.append(prepare_fts_query(query))
     if msg_type:
         conditions.append("msg_type = ?")
         params.append(msg_type)
@@ -199,7 +218,7 @@ def search_list(conn: sqlite3.Connection, query: str = None,
 
     if query:
         conditions.append("m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
-        params.append(query)
+        params.append(prepare_fts_query(query))
     if msg_type:
         conditions.append("m.msg_type = ?")
         params.append(msg_type)
@@ -508,6 +527,8 @@ def main():
     parser.add_argument("--role", help="角色过滤 (user/assistant)")
     parser.add_argument("--tool", help="工具名过滤")
     parser.add_argument("--project", help="项目名过滤")
+    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+                        help="会话平台")
     parser.add_argument("--session", dest="session_id", help="会话 ID 过滤")
     parser.add_argument("--list-sessions", action="store_true", help="列出所有会话")
     parser.add_argument("--since", help="开始时间")
@@ -529,23 +550,25 @@ def main():
 
     # 获取数据库路径（支持多数据库）
     db_paths = []
+    db_platforms = {}
     if args.db:
-        db_paths = [Path(args.db)]
-    elif args.project:
-        # 获取所有匹配的数据库（主项目 + worktrees）
-        db_paths = get_project_db_paths(args.project)
+        path = Path(args.db)
+        db_paths = [path]
+        db_platforms[path] = args.platform
+    else:
+        for platform in get_platforms(args.platform):
+            if args.project:
+                paths = get_project_db_paths(args.project, platform.name)
+            else:
+                default = get_default_db_path(platform=platform.name)
+                paths = [default] if default else []
+            for path in paths:
+                db_paths.append(path)
+                db_platforms[path] = platform.name
         if not db_paths:
             print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto", file=sys.stderr)
+            print("   请先运行: python retrace-index.py --auto --platform codex|claude", file=sys.stderr)
             sys.exit(1)
-    else:
-        # 没有指定项目，使用默认数据库
-        db_path_obj = get_default_db_path()
-        if db_path_obj is None:
-            print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto", file=sys.stderr)
-            sys.exit(1)
-        db_paths = [db_path_obj]
 
     # 验证数据库存在
     for db_path in db_paths:
@@ -565,6 +588,7 @@ def main():
             project_name = db_path.parent.name
             for session in sessions:
                 session['project'] = project_name
+                session['platform'] = db_platforms.get(db_path)
             all_sessions.extend(sessions)
             conn.close()
 
@@ -656,6 +680,7 @@ def main():
             project_name = db_path.parent.name
             for item in results:
                 item['project'] = project_name
+                item['platform'] = db_platforms.get(db_path)
             all_results.extend(results)
             conn.close()
 
@@ -685,6 +710,7 @@ def main():
                     details = search_detail(conn, by_project[project_name])
                     for detail in details:
                         detail['project'] = project_name
+                        detail['platform'] = db_platforms.get(db_path)
                     detailed_results.extend(details)
                     conn.close()
 

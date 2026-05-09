@@ -31,6 +31,17 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
 
+from retrace_paths import (
+    RetracePlatform,
+    configure_utf8_stdio,
+    encode_path,
+    find_platform_command,
+    get_platform,
+    get_platforms,
+)
+
+configure_utf8_stdio()
+
 VERSION = "2.1.0"
 
 # 并行配置
@@ -53,11 +64,12 @@ SUMMARY_HEAD_LINES = 100  # 读取前 N 行生成摘要
 
 
 def get_claude_dir() -> Path:
-    return Path.home() / ".claude"
+    """兼容旧名称：返回 Codex 主目录。"""
+    return get_platform("codex").home_dir
 
 
-def get_projects_dir() -> Path:
-    return get_claude_dir() / "projects"
+def get_projects_dir(platform: str = "codex") -> Path:
+    return get_platform(platform).projects_dir
 
 
 def get_project_db_path(project_dir: Path) -> Path:
@@ -65,9 +77,20 @@ def get_project_db_path(project_dir: Path) -> Path:
     return project_dir / "retrace-index.db"
 
 
-def find_claude() -> Optional[str]:
-    """查找 claude 命令"""
-    return shutil.which("claude") or shutil.which("claude.cmd")
+def reset_index_db(project_dir: Path) -> None:
+    """Remove index database files for a clean rebuild."""
+    db_path = get_project_db_path(project_dir)
+    for path in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as e:
+            print(f"⚠️  无法删除索引文件 {path}: {e}", file=sys.stderr)
+
+
+def find_analysis_command() -> Optional[str]:
+    """查找用于摘要生成的命令。"""
+    return find_platform_command("codex")
 
 
 def create_index_db(db_path: str) -> sqlite3.Connection:
@@ -158,6 +181,134 @@ def extract_content_preview(message: dict, max_len: int = 300) -> str:
     return str(content)[:max_len]
 
 
+def _content_text(content, max_len: int = 300) -> str:
+    """Extract readable text from Codex message content arrays."""
+    if isinstance(content, str):
+        return content[:max_len]
+    if isinstance(content, list):
+        texts = []
+        for item in content:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") in ("input_text", "output_text", "text"):
+                    texts.append(item.get("text", ""))
+                elif item.get("type") == "tool_result":
+                    texts.append(str(item.get("content", ""))[:100])
+        return " ".join(t for t in texts if t)[:max_len]
+    if content is None:
+        return ""
+    return str(content)[:max_len]
+
+
+def extract_codex_project_name(record: dict) -> Optional[str]:
+    """Return the retrace project bucket from a Codex session_meta record."""
+    if record.get("type") != "session_meta":
+        return None
+    cwd = record.get("payload", {}).get("cwd")
+    return encode_path(cwd) if cwd else None
+
+
+def normalize_record(data: dict) -> Optional[dict]:
+    """Normalize Claude-style and Codex-style JSONL records into index fields."""
+    record_type = data.get("type", "")
+
+    if record_type in {"user", "assistant", "tool_result"}:
+        message = data.get("message", {})
+        content_preview = extract_content_preview(message)
+        role = message.get("role", "")
+        tool_name = None
+        content = message.get("content", [])
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "tool_use":
+                    tool_name = item.get("name")
+                    break
+        return {
+            "uuid": data.get("uuid", ""),
+            "parent_uuid": data.get("parentUuid", ""),
+            "session_id": data.get("sessionId", ""),
+            "timestamp": data.get("timestamp", ""),
+            "msg_type": record_type,
+            "role": role,
+            "tool_name": tool_name,
+            "content_preview": content_preview,
+        }
+
+    if record_type == "session_meta":
+        payload = data.get("payload", {})
+        return {
+            "uuid": payload.get("id", ""),
+            "parent_uuid": "",
+            "session_id": payload.get("id", ""),
+            "timestamp": data.get("timestamp", payload.get("timestamp", "")),
+            "msg_type": "session_meta",
+            "role": "",
+            "tool_name": "",
+            "content_preview": f"cwd={payload.get('cwd', '')} originator={payload.get('originator', '')}",
+        }
+
+    if record_type in {"response_item", "turn_context"}:
+        payload = data.get("payload", {})
+        payload_type = payload.get("type", "")
+        session_id = payload.get("id") or data.get("session_id", "")
+        timestamp = data.get("timestamp", "")
+
+        if payload_type == "message":
+            role = payload.get("role", "")
+            msg_type = "assistant" if role == "assistant" else role or "message"
+            return {
+                "uuid": payload.get("id", ""),
+                "parent_uuid": "",
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "msg_type": msg_type,
+                "role": role,
+                "tool_name": "",
+                "content_preview": _content_text(payload.get("content", [])),
+            }
+
+        if payload_type == "function_call":
+            name = payload.get("name", "")
+            args = payload.get("arguments", "")
+            return {
+                "uuid": payload.get("call_id", ""),
+                "parent_uuid": "",
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "msg_type": "tool_use",
+                "role": "assistant",
+                "tool_name": name,
+                "content_preview": args[:300],
+            }
+
+        if payload_type == "function_call_output":
+            return {
+                "uuid": payload.get("call_id", ""),
+                "parent_uuid": "",
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "msg_type": "tool_result",
+                "role": "tool",
+                "tool_name": "",
+                "content_preview": str(payload.get("output", ""))[:300],
+            }
+
+        if record_type == "turn_context":
+            return {
+                "uuid": payload.get("turn_id", ""),
+                "parent_uuid": "",
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "turn_context",
+                "role": "",
+                "tool_name": "",
+                "content_preview": f"cwd={payload.get('cwd', '')}",
+            }
+
+    return None
+
+
 def index_session_file(conn: sqlite3.Connection, session_file: str,
                        incremental: bool = True) -> tuple:
     """索引单个会话文件，返回 (新索引消息数, 会话ID集合)"""
@@ -175,12 +326,21 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
     indexed_count = 0
     line_no = 0
     session_ids = set()
+    current_session_id = ""
 
     if start_offset > 0:
         with open(session_file, 'rb') as f:
             while f.tell() < start_offset:
-                f.readline()
+                line = f.readline()
                 line_no += 1
+                if line_no == 1:
+                    try:
+                        record = json.loads(line.decode("utf-8"))
+                        normalized = normalize_record(record)
+                        if normalized and record.get("type") == "session_meta":
+                            current_session_id = normalized.get("session_id", "")
+                    except Exception:
+                        pass
 
     with open(session_file, 'rb') as f:
         f.seek(start_offset)
@@ -196,26 +356,28 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 byte_offset += line_length
                 continue
 
-            uuid = data.get("uuid", "")
-            parent_uuid = data.get("parentUuid", "")
-            session_id = data.get("sessionId", "")
-            timestamp = data.get("timestamp", "")
-            msg_type = data.get("type", "")
-            message = data.get("message", {})
-            role = message.get("role", "")
+            normalized = normalize_record(data)
+            if not normalized:
+                byte_offset += line_length
+                continue
+
+            if data.get("type") == "session_meta":
+                current_session_id = normalized.get("session_id", "")
+            elif current_session_id and not normalized.get("session_id"):
+                normalized["session_id"] = current_session_id
+
+            uuid = normalized.get("uuid", "")
+            parent_uuid = normalized.get("parent_uuid", "")
+            session_id = normalized.get("session_id", "")
+            timestamp = normalized.get("timestamp", "")
+            msg_type = normalized.get("msg_type", "")
+            role = normalized.get("role", "")
 
             if session_id:
                 session_ids.add(session_id)
 
-            tool_name = None
-            content = message.get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "tool_use":
-                        tool_name = item.get("name")
-                        break
-
-            content_preview = extract_content_preview(message)
+            tool_name = normalized.get("tool_name")
+            content_preview = normalized.get("content_preview", "")
             content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
 
             try:
@@ -301,8 +463,8 @@ def generate_session_summary(conn: sqlite3.Connection, session_id: str) -> Optio
 
     data_str = json.dumps(messages, ensure_ascii=False, separators=(',', ':'))
 
-    claude_cmd = find_claude()
-    if not claude_cmd:
+    analysis_cmd = find_analysis_command()
+    if not analysis_cmd:
         return None
 
     system_prompt = "Summarize this session in 1-2 sentences. What was the main goal/topic? Output plain text only."
@@ -310,7 +472,7 @@ def generate_session_summary(conn: sqlite3.Connection, session_id: str) -> Optio
 
     try:
         result = subprocess.run(
-            [claude_cmd, "-p", user_prompt,
+            [analysis_cmd, "-p", user_prompt,
              "--system-prompt", system_prompt,
              "--model", "haiku",
              "--no-session-persistence",
@@ -380,8 +542,8 @@ def _generate_summary_worker(args):
         return session_id, None, "empty"
 
     data_str = json.dumps(messages, ensure_ascii=False, separators=(',', ':'))
-    claude_cmd = find_claude()
-    if not claude_cmd:
+    analysis_cmd = find_analysis_command()
+    if not analysis_cmd:
         print(f"    [THREAD {thread_id}] <<< {session_id[:8]} NO_CLAUDE")
         return session_id, None, "no_claude"
 
@@ -392,7 +554,7 @@ def _generate_summary_worker(args):
     api_start = time.time()
     try:
         result = subprocess.run(
-            [claude_cmd, "-p", user_prompt,
+            [analysis_cmd, "-p", user_prompt,
              "--system-prompt", system_prompt,
              "--model", "haiku",
              "--no-session-persistence",
@@ -483,28 +645,108 @@ def index_single_project(project_dir: Path, incremental: bool = True,
     return total
 
 
+def detect_session_project(session_file: Path, platform: RetracePlatform) -> Optional[str]:
+    """Read a session file and return its encoded project bucket."""
+    if platform.name == "claude":
+        return session_file.parent.name
+
+    try:
+        with open(session_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                project_name = extract_codex_project_name(record)
+                if project_name:
+                    return project_name
+    except OSError:
+        return None
+    return None
+
+
+def discover_project_files(platform: RetracePlatform, project_filter: str = None) -> Dict[Path, List[Path]]:
+    """Group session files by retrace project directory for one platform."""
+    projects_dir = platform.projects_dir
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    grouped: Dict[Path, List[Path]] = {}
+
+    for session_file in platform.iter_session_files():
+        project_name = detect_session_project(session_file, platform)
+        if not project_name:
+            continue
+        if project_filter and project_filter.lower() not in project_name.lower():
+            continue
+        project_dir = projects_dir / project_name
+        grouped.setdefault(project_dir, []).append(session_file)
+
+    return grouped
+
+
+def index_session_files_for_project(project_dir: Path, session_files: List[Path],
+                                    incremental: bool = True,
+                                    generate_summaries: bool = True) -> int:
+    """Index an explicit set of Codex session files into one project DB."""
+    import time
+    start_time = time.time()
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    if not incremental:
+        reset_index_db(project_dir)
+    db_path = get_project_db_path(project_dir)
+    conn = create_index_db(str(db_path))
+
+    total = 0
+    all_session_ids = set()
+    for session_file in sorted(session_files):
+        count, session_ids = index_session_file(conn, str(session_file), incremental)
+        all_session_ids.update(session_ids)
+        if count > 0:
+            print(f"  📝 {session_file.name[:40]}... (+{count})")
+            for sid in session_ids:
+                update_session_meta(conn, sid, str(session_file))
+        total += count
+
+    if generate_summaries and total > 0:
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id FROM sessions WHERE summary IS NULL")
+        unsummarized = [r[0] for r in cursor.fetchall()]
+        if unsummarized:
+            print("  📋 跳过摘要生成：Codex exec 调用成本较高，可用 --no-summary 保持纯索引")
+
+    conn.close()
+    wall_time = time.time() - start_time
+    if total > 0:
+        print(f"  ⏱ 索引完成: {total} 条消息, 耗时 {wall_time:.1f}s")
+    return total
+
+
 def index_all_projects(project_filter: str = None, incremental: bool = True,
-                       generate_summaries: bool = True) -> int:
+                       generate_summaries: bool = True, platform_name: str = "codex") -> int:
     """索引所有项目（每个项目独立数据库）"""
     import time
     overall_start = time.time()
 
-    projects_dir = get_projects_dir()
-    if not projects_dir.exists():
-        print(f"❌ 找不到项目目录: {projects_dir}", file=sys.stderr)
-        return 0
-
     total = 0
+    platform_count = 0
 
-    for pd in sorted(projects_dir.iterdir()):
-        if not pd.is_dir():
-            continue
-        if project_filter and project_filter.lower() not in pd.name.lower():
+    for platform in get_platforms(platform_name):
+        grouped = discover_project_files(platform, project_filter)
+        if not grouped:
+            print(f"❌ 找不到 {platform.name} 会话: {platform.home_dir}", file=sys.stderr)
             continue
 
-        print(f"📂 {pd.name}")
-        count = index_single_project(pd, incremental, generate_summaries)
-        total += count
+        platform_count += 1
+        print(f"🧭 platform={platform.name}")
+        for pd, session_files in sorted(grouped.items(), key=lambda item: item[0].name):
+            print(f"📂 {pd.name}")
+            count = index_session_files_for_project(pd, session_files, incremental, generate_summaries)
+            total += count
+
+    if platform_count == 0:
+        return 0
 
     overall_time = time.time() - overall_start
     if total > 0:
@@ -549,22 +791,24 @@ def get_project_stats(project_dir: Path) -> dict:
     }
 
 
-def get_all_stats(project_filter: str = None) -> list:
+def get_all_stats(project_filter: str = None, platform_name: str = "codex") -> list:
     """获取所有项目的统计"""
-    projects_dir = get_projects_dir()
-    if not projects_dir.exists():
-        return []
-
     stats = []
-    for pd in sorted(projects_dir.iterdir()):
-        if not pd.is_dir():
+    for platform in get_platforms(platform_name):
+        projects_dir = platform.projects_dir
+        if not projects_dir.exists():
             continue
-        if project_filter and project_filter.lower() not in pd.name.lower():
-            continue
+        for pd in sorted(projects_dir.iterdir()):
+            if not pd.is_dir():
+                continue
+            if project_filter and project_filter.lower() not in pd.name.lower():
+                continue
 
-        db_path = get_project_db_path(pd)
-        if db_path.exists():
-            stats.append(get_project_stats(pd))
+            db_path = get_project_db_path(pd)
+            if db_path.exists():
+                item = get_project_stats(pd)
+                item["platform"] = platform.name
+                stats.append(item)
 
     return stats
 
@@ -573,6 +817,8 @@ def main():
     parser = argparse.ArgumentParser(description="Claude Code 会话日志索引器 (按项目独立索引)")
     parser.add_argument("--auto", action="store_true", help="自动索引所有项目")
     parser.add_argument("--project", help="过滤项目名")
+    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+                        help="会话平台")
     parser.add_argument("--no-incremental", action="store_true", help="重建索引")
     parser.add_argument("--no-summary", action="store_true", help="不生成会话摘要")
     parser.add_argument("--stats", action="store_true", help="显示统计信息")
@@ -585,7 +831,7 @@ def main():
     generate_summaries = not args.no_summary
 
     if args.stats:
-        stats = get_all_stats(args.project)
+        stats = get_all_stats(args.project, args.platform)
         if args.json:
             print(json.dumps(stats, ensure_ascii=False, indent=2))
         else:
@@ -608,7 +854,7 @@ def main():
         return
 
     if args.auto:
-        total = index_all_projects(args.project, incremental, generate_summaries)
+        total = index_all_projects(args.project, incremental, generate_summaries, args.platform)
         print(f"\n✅ 索引完成，共 {total:,} 条新消息")
     else:
         parser.print_help()

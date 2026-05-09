@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from retrace_paths import find_codex
+
 SCRIPT_DIR = Path(__file__).parent
 
 # 配置
@@ -18,9 +20,9 @@ MAX_BYTES_PER_CHUNK = 100 * 1024     # 每个分片最大 100KB
 MAX_PARALLEL = 20                     # 最大并行数
 
 
-def find_claude() -> Optional[str]:
-    """查找 claude 命令"""
-    return shutil.which("claude") or shutil.which("claude.cmd")
+def find_analysis_command() -> Optional[str]:
+    """查找用于 AI 分析的命令。"""
+    return find_codex()
 
 
 def get_data_size(json_str: str) -> int:
@@ -87,11 +89,11 @@ def chunk_by_size(results: List[Dict], max_bytes: int = MAX_BYTES_PER_CHUNK) -> 
     return chunks
 
 
-def call_haiku(data: List[Dict], system_prompt: str, user_prompt: str, timeout: int = 120) -> Dict:
-    """调用 Haiku 分析，返回原始输出"""
-    claude_cmd = find_claude()
-    if not claude_cmd:
-        return {"success": False, "error": "claude not found"}
+def call_analysis_model(data: List[Dict], system_prompt: str, user_prompt: str, timeout: int = 120) -> Dict:
+    """调用 Codex exec 分析，返回原始输出。"""
+    codex_cmd = find_analysis_command()
+    if not codex_cmd:
+        return {"success": False, "error": "codex not found"}
 
     data_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
 
@@ -99,12 +101,10 @@ def call_haiku(data: List[Dict], system_prompt: str, user_prompt: str, timeout: 
     start = time.time()
     try:
         result = subprocess.run(
-            [claude_cmd, "-p", user_prompt,
-             "--system-prompt", system_prompt,
-             "--model", "haiku",
-             "--no-session-persistence",
-             "--dangerously-skip-permissions",
-             "--output-format", "json"],
+            [codex_cmd, "exec",
+             "--dangerously-bypass-approvals-and-sandbox",
+             "--skip-git-repo-check",
+             f"{system_prompt}\n\n{user_prompt}\n\nReturn JSON only."],
             input=data_str,
             capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )

@@ -22,17 +22,20 @@ import argparse
 from pathlib import Path
 from typing import Optional, List
 
+from retrace_paths import configure_utf8_stdio, encode_path, get_platform
+
+configure_utf8_stdio()
+
 VERSION = "1.0.0"
 
 
 def get_claude_dir() -> Path:
-    """获取 Claude 主目录"""
-    return Path.home() / ".claude"
+    """兼容旧名称：返回 Codex 主目录。"""
+    return get_platform("codex").home_dir
 
 
-def get_projects_dir() -> Path:
-    """获取项目目录"""
-    return get_claude_dir() / "projects"
+def get_projects_dir(platform: str = "codex") -> Path:
+    return get_platform(platform).projects_dir
 
 
 def get_project_db_path(project_dir: Path) -> Path:
@@ -41,10 +44,9 @@ def get_project_db_path(project_dir: Path) -> Path:
 
 
 def detect_current_project() -> Optional[str]:
+    # Codex path encoding example: D:\Projects\polydev -> D--Projects-polydev
+    # Worktrees are matched by encoded project prefix.
     """检测当前工作目录对应的项目名称
-
-    Claude 的路径编码规则: D:\Projects\polydev -> D--Projects-polydev
-    将 : 和 \ 都替换为 -
     """
     cwd = Path.cwd()
 
@@ -52,19 +54,16 @@ def detect_current_project() -> Optional[str]:
     cwd_abs = cwd.resolve()
     cwd_str = str(cwd_abs)
 
-    # Claude 编码: : 和 \ 都替换为 -
-    project_encoded = cwd_str.replace(':', '-').replace('\\', '-')
-
-    return project_encoded
+    return encode_path(cwd_str)
 
 
-def find_matching_project_dbs(project_hint: str = None) -> List[tuple]:
+def find_matching_project_dbs(project_hint: str = None, platform: str = "codex") -> List[tuple]:
     """
     查找匹配的项目数据库
 
     返回: [(project_dir, db_path, project_name)]
     """
-    projects_dir = get_projects_dir()
+    projects_dir = get_projects_dir(platform)
     if not projects_dir.exists():
         return []
 
@@ -243,6 +242,12 @@ def main():
         help="以 JSON 格式输出"
     )
     parser.add_argument(
+        "--platform",
+        choices=["codex", "claude"],
+        required=True,
+        help="会话平台"
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {VERSION}"
@@ -254,7 +259,7 @@ def main():
     current_dir = str(Path.cwd())
 
     # 查找匹配的项目数据库
-    matched_projects = find_matching_project_dbs(args.project)
+    matched_projects = find_matching_project_dbs(args.project, args.platform)
 
     if not matched_projects:
         print("❌ 没有找到匹配的项目数据库", file=sys.stderr)

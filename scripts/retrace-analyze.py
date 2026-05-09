@@ -19,9 +19,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 
 from retrace_common import (
-    search, get_data_size, call_haiku, chunk_by_size,
+    search, get_data_size, call_analysis_model, chunk_by_size,
     SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
 )
+from retrace_paths import configure_utf8_stdio
+
+configure_utf8_stdio()
 
 VERSION = "1.2.0"
 
@@ -60,7 +63,7 @@ def parse_output(stdout: str, elapsed: float) -> Dict:
 def analyze_single(results: List[Dict], prompt: str) -> Dict:
     """单次分析"""
     user_prompt = f"Analyze {len(results)} records. Task: {prompt}."
-    result = call_haiku(results, SYSTEM_PROMPT, user_prompt)
+    result = call_analysis_model(results, SYSTEM_PROMPT, user_prompt)
 
     if result.get("success"):
         return parse_output(result["stdout"], result["elapsed"])
@@ -70,7 +73,7 @@ def analyze_single(results: List[Dict], prompt: str) -> Dict:
 def analyze_chunk(chunk: List[Dict], chunk_id: int, prompt: str) -> Dict:
     """分析单个分片"""
     user_prompt = f"Analyze {len(chunk)} records. Task: {prompt}."
-    result = call_haiku(chunk, SYSTEM_PROMPT, user_prompt)
+    result = call_analysis_model(chunk, SYSTEM_PROMPT, user_prompt)
 
     if result.get("success"):
         parsed = parse_output(result["stdout"], result["elapsed"])

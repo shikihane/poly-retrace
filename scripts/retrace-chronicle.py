@@ -25,22 +25,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional
 
-from retrace_common import call_haiku, chunk_by_size, SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
+from retrace_common import call_analysis_model, chunk_by_size, SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
+from retrace_paths import configure_utf8_stdio, get_platform, iter_session_files
+
+configure_utf8_stdio()
 
 VERSION = "2.0.0"
 
 
 def get_claude_dir() -> Path:
-    return Path.home() / ".claude"
+    """兼容旧名称：返回 Codex 主目录。"""
+    return get_platform("codex").home_dir
 
 
-def get_projects_dir() -> Path:
-    return get_claude_dir() / "projects"
+def get_projects_dir(platform: str = "codex") -> Path:
+    return get_platform(platform).projects_dir
 
 
-def find_project_dir(project_name: str) -> Optional[Path]:
+def find_project_dir(project_name: str, platform: str = "codex") -> Optional[Path]:
     """查找项目目录"""
-    projects_dir = get_projects_dir()
+    projects_dir = get_projects_dir(platform)
     if not projects_dir.exists():
         return None
     for pd in projects_dir.iterdir():
@@ -49,9 +53,22 @@ def find_project_dir(project_name: str) -> Optional[Path]:
     return None
 
 
-def find_session_file(session_uuid: str, project_name: str) -> Optional[Path]:
+def find_session_file(session_uuid: str, project_name: str, platform: str = "codex") -> Optional[Path]:
     """根据 session UUID 查找 JSONL 文件"""
-    project_dir = find_project_dir(project_name)
+    for jsonl in iter_session_files(platform):
+        if session_uuid in jsonl.stem:
+            return jsonl
+        try:
+            with open(jsonl, "r", encoding="utf-8") as f:
+                first = json.loads(f.readline())
+            payload = first.get("payload", {})
+            if first.get("type") == "session_meta" and payload.get("id") == session_uuid:
+                if not project_name or project_name.lower() in payload.get("cwd", "").lower():
+                    return jsonl
+        except Exception:
+            pass
+
+    project_dir = find_project_dir(project_name, platform)
     if not project_dir:
         return None
 
@@ -204,6 +221,64 @@ def extract_message(record: Dict, line_num: int) -> Optional[Dict]:
                 "type": "user",
                 "role": role,
                 "content": content[:10000]
+            }
+
+    elif msg_type == "session_meta":
+        payload = record.get("payload", {})
+        content = f"cwd={payload.get('cwd', '')} originator={payload.get('originator', '')}"
+        return {
+            "line": line_num,
+            "timestamp": timestamp or payload.get("timestamp", ""),
+            "type": "session_meta",
+            "role": "system",
+            "content": content[:10000],
+        }
+
+    elif msg_type == "response_item":
+        payload = record.get("payload", {})
+        payload_type = payload.get("type", "")
+
+        if payload_type == "message":
+            role = payload.get("role", "")
+            content = payload.get("content", [])
+            text = ""
+            if isinstance(content, list):
+                text = "\n".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") in ("input_text", "output_text", "text")
+                )
+            elif isinstance(content, str):
+                text = content
+            if text:
+                return {
+                    "line": line_num,
+                    "timestamp": timestamp,
+                    "type": role or "message",
+                    "role": role,
+                    "content": text[:10000],
+                }
+
+        if payload_type == "function_call":
+            name = payload.get("name", "")
+            arguments = payload.get("arguments", "")
+            content = f"---TOOLS---\n@{name} {arguments[:1000]}"
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "tool_use",
+                "role": "assistant",
+                "tool": name,
+                "content": content[:10000],
+            }
+
+        if payload_type == "function_call_output":
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "tool_result",
+                "role": "tool",
+                "content": str(payload.get("output", ""))[:10000],
             }
 
     # assistant 消息
@@ -434,7 +509,7 @@ def parse_output(stdout: str, elapsed: float) -> Dict:
 def analyze_single(results: List[Dict]) -> Dict:
     """单次分析"""
     user_prompt = USER_PROMPT.format(count=len(results))
-    result = call_haiku(results, SYSTEM_PROMPT, user_prompt, timeout=180)
+    result = call_analysis_model(results, SYSTEM_PROMPT, user_prompt, timeout=180)
 
     if result.get("success"):
         return parse_output(result["stdout"], result["elapsed"])
@@ -444,7 +519,7 @@ def analyze_single(results: List[Dict]) -> Dict:
 def analyze_chunk(chunk: List[Dict], chunk_id: int) -> Dict:
     """分析单个分片"""
     user_prompt = USER_PROMPT.format(count=len(chunk))
-    result = call_haiku(chunk, SYSTEM_PROMPT, user_prompt, timeout=180)
+    result = call_analysis_model(chunk, SYSTEM_PROMPT, user_prompt, timeout=180)
 
     if result.get("success"):
         parsed = parse_output(result["stdout"], result["elapsed"])
@@ -514,6 +589,8 @@ def main():
     group.add_argument("--session", help="Session UUID")
     group.add_argument("--file", help="JSONL 文件路径")
     parser.add_argument("--project", help="项目名（--session 时必须）")
+    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+                        help="会话平台")
     parser.add_argument("--output", "-o", required=True, help="输出文件路径（必选）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     parser.add_argument("--version", "-v", action="version", version=f"retrace-chronicle {VERSION}")
@@ -529,7 +606,7 @@ def main():
         if not args.project:
             print("❌ 使用 --session 时必须指定 --project", file=sys.stderr)
             sys.exit(1)
-        session_file = find_session_file(args.session, args.project)
+        session_file = find_session_file(args.session, args.project, args.platform)
         if not session_file:
             print(f"❌ 找不到会话: {args.session} (项目: {args.project})", file=sys.stderr)
             sys.exit(1)

@@ -13,11 +13,15 @@ import os
 import sys
 from pathlib import Path
 
+from retrace_paths import configure_utf8_stdio, get_platforms
+
+configure_utf8_stdio()
+
 VERSION = "1.0.0"
 
 
-def get_projects_dir() -> Path:
-    return Path.home() / ".claude" / "projects"
+def get_projects_dir(platform: str = "codex") -> Path:
+    return get_platforms(platform)[0].projects_dir
 
 
 def get_project_db_path(project_dir: Path) -> Path:
@@ -43,40 +47,41 @@ def match_project(pd_name: str, project_name: str) -> bool:
             pd_lower.endswith(pattern3) or pd_lower.endswith(pattern4))
 
 
-def clean_index(project_name: str = None, all_projects: bool = False, dry_run: bool = False) -> tuple:
+def clean_index(project_name: str = None, all_projects: bool = False,
+                dry_run: bool = False, platform: str = "codex") -> tuple:
     """清理索引数据库"""
-    projects_dir = get_projects_dir()
-
-    if not projects_dir.exists():
-        print(f"❌ 找不到项目目录: {projects_dir}")
-        return 0, 0
-
     deleted = 0
     total_size = 0
 
-    for pd in sorted(projects_dir.iterdir()):
-        if not pd.is_dir():
+    for retrace_platform in get_platforms(platform):
+        projects_dir = retrace_platform.projects_dir
+        if not projects_dir.exists():
+            print(f"❌ 找不到项目目录: {projects_dir}")
             continue
 
-        # 过滤项目
-        if all_projects:
-            pass  # 不过滤
-        elif project_name:
-            if not match_project(pd.name, project_name):
+        for pd in sorted(projects_dir.iterdir()):
+            if not pd.is_dir():
                 continue
-        else:
-            continue  # 没有指定且不是 --all，跳过
 
-        db_path = get_project_db_path(pd)
-        if db_path.exists():
-            size = db_path.stat().st_size
-            if dry_run:
-                print(f"  [DRY-RUN] 将删除: {pd.name} ({size:,} bytes)")
+            if all_projects:
+                pass
+            elif project_name:
+                if not match_project(pd.name, project_name):
+                    continue
             else:
-                print(f"  🗑️ 删除: {pd.name} ({size:,} bytes)")
-                db_path.unlink()
-            deleted += 1
-            total_size += size
+                continue
+
+            db_path = get_project_db_path(pd)
+            if db_path.exists():
+                size = db_path.stat().st_size
+                label = f"{retrace_platform.name}:{pd.name}"
+                if dry_run:
+                    print(f"  [DRY-RUN] 将删除: {label} ({size:,} bytes)")
+                else:
+                    print(f"  🗑️ 删除: {label} ({size:,} bytes)")
+                    db_path.unlink()
+                deleted += 1
+                total_size += size
 
     return deleted, total_size
 
@@ -97,6 +102,8 @@ def main():
     parser.add_argument("--project", help="项目名称（部分匹配，必填，除非使用 --all）")
     parser.add_argument("--all", action="store_true", help="清理所有项目的索引")
     parser.add_argument("--dry-run", action="store_true", help="预览但不删除")
+    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+                        help="会话平台")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     args = parser.parse_args()
@@ -106,13 +113,13 @@ def main():
         parser.error("必须指定 --project <名称> 或使用 --all")
 
     print(f"🧹 索引清理工具 v{VERSION}")
-    print(f"   项目目录: {get_projects_dir()}")
+    print(f"   项目目录: {', '.join(str(p.projects_dir) for p in get_platforms(args.platform))}")
     print()
 
     if args.dry_run:
         print("🔍 预览模式（不会实际删除）\n")
 
-    deleted, size = clean_index(args.project, args.all, args.dry_run)
+    deleted, size = clean_index(args.project, args.all, args.dry_run, args.platform)
 
     print()
     if args.dry_run:
