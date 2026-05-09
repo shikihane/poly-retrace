@@ -23,8 +23,9 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 1. Set script and Python variables in PowerShell 7.
 2. Ensure the project index exists before searching.
 3. Search with layered output: `stats`, `list`, then `detail`.
-4. Use `chronicle` for single-session history extraction.
-5. Use `recover` for file version restoration.
+4. Use `--hybrid` proactively for mixed Chinese/code/log queries, especially Chinese phrases plus code symbols, error names, hyphenated terms, paths, or long tool outputs.
+5. Use `chronicle` for single-session history extraction.
+6. Use `recover` for file version restoration.
 
 ## PowerShell Setup
 
@@ -53,10 +54,15 @@ Use `--no-summary` for normal local use. Summary and analysis commands call `cod
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "query" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "error" --level stats --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 ```
+
+Use `--hybrid` for mixed Chinese/code/log queries. It combines the normal FTS index with a selective trigram index, so it is better for Chinese phrases, hyphenated terms, paths, and substrings.
+
+Prefer `--hybrid` immediately when queries look like `录音确认超时 req_id`, `Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake`, `path/to/file.c:123`, or pasted log fragments. Default FTS is still fine for simple English/code tokens such as `pwsh`, `shell_command`, or a single function name.
 
 ## AI-Powered Analysis
 

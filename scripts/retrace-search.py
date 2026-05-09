@@ -52,6 +52,74 @@ def prepare_fts_query(query: str) -> str:
     return f'"{escaped}"'
 
 
+def fts_table_column(conn: sqlite3.Connection, table: str) -> str:
+    """Return the searchable FTS column, supporting old and new index schemas."""
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    return "search_text" if "search_text" in columns else "content_preview"
+
+
+def has_table(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def prepare_trigram_query(query: str) -> str:
+    escaped = query.strip().replace('"', '""')
+    return f'"{escaped}"'
+
+
+def hybrid_query_terms(query: str) -> list:
+    """Return phrase and token queries for trigram recall."""
+    terms = []
+    stripped = query.strip()
+    if stripped:
+        terms.append(stripped)
+    for token in re.findall(r"[\w-]+|[\u4e00-\u9fff]{2,}", stripped, flags=re.UNICODE):
+        if len(token) >= 3 and token not in terms:
+            terms.append(token)
+    return terms
+
+
+def merge_hybrid_rows(existing: dict, rows: list, source: str, score_base: float) -> None:
+    for rank, row in enumerate(rows):
+        msg_id = row["id"]
+        score = score_base - (rank * 0.01)
+        if msg_id not in existing:
+            row["match_sources"] = [source]
+            row["hybrid_score"] = score
+            existing[msg_id] = row
+        else:
+            if source not in existing[msg_id]["match_sources"]:
+                existing[msg_id]["match_sources"].append(source)
+            existing[msg_id]["hybrid_score"] += score
+
+
+def get_message_search_text(conn: sqlite3.Connection, ids: list) -> dict:
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    text_column = "search_text" if "search_text" in columns else "content_preview"
+    rows = conn.execute(
+        f"SELECT id, COALESCE({text_column}, content_preview, '') FROM messages WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def score_hybrid_coverage(conn: sqlite3.Connection, merged: dict, terms: list) -> None:
+    texts = get_message_search_text(conn, list(merged.keys()))
+    normalized_terms = [term.lower() for term in terms if term]
+    for msg_id, item in merged.items():
+        text = texts.get(msg_id, "").lower()
+        coverage = sum(1 for term in normalized_terms if term in text)
+        item["term_coverage"] = coverage
+        item["hybrid_score"] += coverage * 0.75
+
+
 def get_claude_dir() -> Path:
     """兼容旧名称：返回 Codex 主目录。"""
     return get_platform("codex").home_dir
@@ -287,6 +355,144 @@ def search_list(conn: sqlite3.Connection, query: str = None,
     return results
 
 
+def fts_search_rows(conn: sqlite3.Connection, query: str, msg_type: str = None,
+                    role: str = None, tool: str = None, since: str = None,
+                    until: str = None, session_id: str = None,
+                    limit: int = 50) -> list:
+    conditions = ["messages_fts MATCH ?"]
+    params = [prepare_fts_query(query)]
+    if msg_type:
+        conditions.append("m.msg_type = ?")
+        params.append(msg_type)
+    if role:
+        conditions.append("m.role = ?")
+        params.append(role)
+    if tool:
+        conditions.append("m.tool_name = ?")
+        params.append(tool)
+    if session_id:
+        conditions.append("m.session_id = ?")
+        params.append(session_id)
+    if since:
+        conditions.append("m.timestamp >= ?")
+        params.append(since)
+    if until:
+        conditions.append("m.timestamp <= ?")
+        params.append(until)
+
+    sql = f"""
+        SELECT m.id, m.timestamp, m.msg_type, m.role, m.tool_name,
+               SUBSTR(m.content_preview, 1, 160) as preview,
+               m.session_id
+        FROM messages_fts f
+        JOIN messages m ON m.id = f.rowid
+        WHERE {" AND ".join(conditions)}
+        ORDER BY bm25(messages_fts)
+        LIMIT ?
+    """
+    rows = []
+    for row in conn.execute(sql, params + [limit]).fetchall():
+        rows.append({
+            "id": row[0],
+            "timestamp": row[1],
+            "type": row[2],
+            "role": row[3],
+            "tool": row[4],
+            "preview": row[5],
+            "session_id": row[6],
+        })
+    return rows
+
+
+def trigram_search_rows(conn: sqlite3.Connection, query: str, msg_type: str = None,
+                        role: str = None, tool: str = None, since: str = None,
+                        until: str = None, session_id: str = None,
+                        limit: int = 50) -> list:
+    if not has_table(conn, "messages_trigram_fts"):
+        return []
+    conditions = ["messages_trigram_fts MATCH ?"]
+    params = [prepare_trigram_query(query)]
+    if msg_type:
+        conditions.append("m.msg_type = ?")
+        params.append(msg_type)
+    if role:
+        conditions.append("m.role = ?")
+        params.append(role)
+    if tool:
+        conditions.append("m.tool_name = ?")
+        params.append(tool)
+    if session_id:
+        conditions.append("m.session_id = ?")
+        params.append(session_id)
+    if since:
+        conditions.append("m.timestamp >= ?")
+        params.append(since)
+    if until:
+        conditions.append("m.timestamp <= ?")
+        params.append(until)
+
+    sql = f"""
+        SELECT m.id, m.timestamp, m.msg_type, m.role, m.tool_name,
+               SUBSTR(m.content_preview, 1, 160) as preview,
+               m.session_id
+        FROM messages_trigram_fts f
+        JOIN messages m ON m.id = f.rowid
+        WHERE {" AND ".join(conditions)}
+        ORDER BY bm25(messages_trigram_fts)
+        LIMIT ?
+    """
+    rows = []
+    for row in conn.execute(sql, params + [limit]).fetchall():
+        rows.append({
+            "id": row[0],
+            "timestamp": row[1],
+            "type": row[2],
+            "role": row[3],
+            "tool": row[4],
+            "preview": row[5],
+            "session_id": row[6],
+        })
+    return rows
+
+
+def hybrid_search_list(conn: sqlite3.Connection, query: str,
+                       msg_type: str = None, role: str = None,
+                       tool: str = None, since: str = None,
+                       until: str = None, session_id: str = None,
+                       limit: int = 20) -> list:
+    merged = {}
+    search_limit = max(limit * 4, 50)
+    try:
+        fts_rows = fts_search_rows(
+            conn, query, msg_type, role, tool, since, until, session_id, search_limit
+        )
+    except sqlite3.OperationalError:
+        fts_rows = []
+    merge_hybrid_rows(merged, fts_rows, "fts", 2.0)
+
+    terms = hybrid_query_terms(query)
+    for term in terms:
+        try:
+            trigram_rows = trigram_search_rows(
+                conn, term, msg_type, role, tool, since, until, session_id, search_limit
+            )
+        except sqlite3.OperationalError:
+            trigram_rows = []
+        merge_hybrid_rows(merged, trigram_rows, "trigram", 1.5)
+
+    score_hybrid_coverage(conn, merged, terms)
+    results = sorted(
+        merged.values(),
+        key=lambda item: (
+            item.get("term_coverage", 0),
+            item.get("hybrid_score", 0),
+            item.get("timestamp", ""),
+        ),
+        reverse=True,
+    )
+    return results[:limit]
+
+
 def search_detail(conn: sqlite3.Connection, ids: list, preview_len: int = 300) -> list:
     """Level 2: 返回指定 ID 的详细预览"""
     cursor = conn.cursor()
@@ -474,8 +680,11 @@ def format_output(data, level: str, json_output: bool):
             ts = item.get('timestamp', '')[:19] if item.get('timestamp') else ''
             mtype = item.get('type', '')
             tool = f":{item['tool']}" if item.get('tool') else ""
+            sources = ""
+            if item.get("match_sources"):
+                sources = f" [{','.join(item['match_sources'])}]"
             preview = item.get('preview', '').replace('\n', ' ')[:60]
-            print(f"[{item['id']}] {ts} {mtype}{tool}")
+            print(f"[{item['id']}] {ts} {mtype}{tool}{sources}")
             print(f"     {preview}...")
             print()
 
@@ -535,6 +744,8 @@ def main():
     parser.add_argument("--until", help="结束时间")
     parser.add_argument("--level", choices=["stats", "list", "detail"], default="list",
                         help="输出级别")
+    parser.add_argument("--hybrid", action="store_true",
+                        help="混合搜索：普通 FTS + selective trigram")
     parser.add_argument("--limit", type=int, default=20, help="返回数量限制")
     parser.add_argument("--offset", type=int, default=0, help="偏移量")
     parser.add_argument("--ids", help="指定消息 ID（逗号分隔）")
@@ -621,7 +832,7 @@ def main():
         format_output(result, "detail", args.json)
         conn.close()
 
-    elif args.level == "stats":
+    elif args.level == "stats" and not args.hybrid:
         # 合并所有数据库的统计结果
         total_count = 0
         all_by_type = {}
@@ -672,10 +883,16 @@ def main():
         all_results = []
         for db_path in db_paths:
             conn = sqlite3.connect(str(db_path))
-            results = search_list(conn, args.query, args.msg_type, args.role,
-                                args.tool, args.project, args.since, args.until,
-                                args.session_id,
-                                0, 0)  # 先不限制，后面统一排序和限制
+            if args.hybrid and args.query:
+                results = hybrid_search_list(conn, args.query, args.msg_type, args.role,
+                                             args.tool, args.since, args.until,
+                                             args.session_id,
+                                             max(args.limit * 4, 50))
+            else:
+                results = search_list(conn, args.query, args.msg_type, args.role,
+                                    args.tool, args.project, args.since, args.until,
+                                    args.session_id,
+                                    0, 0)  # 先不限制，后面统一排序和限制
             # 添加来源项目标注
             project_name = db_path.parent.name
             for item in results:
@@ -684,8 +901,14 @@ def main():
             all_results.extend(results)
             conn.close()
 
-        # 按时间戳排序
-        all_results.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        # Hybrid keeps score order; default search keeps timestamp order.
+        if args.hybrid and args.query:
+            all_results.sort(
+                key=lambda x: (x.get("hybrid_score", 0), x.get('timestamp', '')),
+                reverse=True,
+            )
+        else:
+            all_results.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
 
         # 应用 limit 和 offset
         if args.limit > 0:

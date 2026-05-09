@@ -43,6 +43,11 @@ from retrace_paths import (
 configure_utf8_stdio()
 
 VERSION = "2.1.0"
+PREVIEW_LIMIT = 300
+SEARCH_TEXT_LIMIT = 8192
+TRIGRAM_TOOL_RESULT_LIMIT = 4096
+TRIGRAM_OTHER_LIMIT = 8192
+TRIGRAM_MESSAGE_TYPES = {"user", "assistant", "tool_use", "tool_result"}
 
 # 并行配置
 MAX_WORKERS = 4  # 项目级并行数
@@ -125,6 +130,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             role TEXT,
             tool_name TEXT,
             content_preview TEXT,
+            search_text TEXT,
             content_hash TEXT,
             UNIQUE(session_file, byte_offset)
         );
@@ -140,7 +146,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING {fts}(
-            content_preview, msg_type, role, tool_name {tokenize}
+            search_text, msg_type, role, tool_name {tokenize}
         );
 
         CREATE TABLE IF NOT EXISTS meta (
@@ -155,10 +161,76 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_session ON messages(session_id);
     ''')
 
+    ensure_index_schema(conn)
+
     return conn
 
 
-def extract_content_preview(message: dict, max_len: int = 300) -> str:
+def ensure_index_schema(conn: sqlite3.Connection) -> None:
+    """Apply lightweight schema upgrades for existing index databases."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "search_text" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN search_text TEXT")
+        conn.execute("UPDATE messages SET search_text = content_preview WHERE search_text IS NULL")
+
+    fts_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")}
+    if "search_text" not in fts_columns:
+        conn.execute("DROP TABLE IF EXISTS messages_fts")
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                search_text, msg_type, role, tool_name,
+                tokenize='unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO messages_fts(rowid, search_text, msg_type, role, tool_name)
+            SELECT id, COALESCE(search_text, content_preview, ''), msg_type, role, COALESCE(tool_name, '')
+            FROM messages
+            """
+        )
+
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_trigram_fts USING fts5(
+                search_text, msg_type, role, tool_name,
+                tokenize='trigram'
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        conn.commit()
+        return
+    trigram_count = conn.execute("SELECT COUNT(*) FROM messages_trigram_fts").fetchone()[0]
+    message_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    if message_count and trigram_count == 0:
+        placeholders = ",".join("?" * len(TRIGRAM_MESSAGE_TYPES))
+        params = list(TRIGRAM_MESSAGE_TYPES)
+        conn.execute(
+            f"""
+            INSERT INTO messages_trigram_fts(rowid, search_text, msg_type, role, tool_name)
+            SELECT id,
+                   CASE
+                       WHEN msg_type = 'tool_result'
+                       THEN SUBSTR(COALESCE(search_text, content_preview, ''), 1, ?)
+                       ELSE SUBSTR(COALESCE(search_text, content_preview, ''), 1, ?)
+                   END,
+                   msg_type,
+                   role,
+                   COALESCE(tool_name, '')
+            FROM messages
+            WHERE msg_type IN ({placeholders})
+              AND LENGTH(TRIM(COALESCE(search_text, content_preview, ''))) >= 3
+            """,
+            [TRIGRAM_TOOL_RESULT_LIMIT, TRIGRAM_OTHER_LIMIT] + params,
+        )
+    conn.commit()
+
+
+def extract_content_preview(message: dict, max_len: int = PREVIEW_LIMIT) -> str:
     """从消息中提取内容预览"""
     content = message.get("content", "")
     if isinstance(content, str):
@@ -201,6 +273,47 @@ def _content_text(content, max_len: int = 300) -> str:
     return str(content)[:max_len]
 
 
+def extract_search_text(message: dict, max_len: int = SEARCH_TEXT_LIMIT) -> str:
+    """Extract longer text for search indexing without changing list previews."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content[:max_len]
+    if isinstance(content, list):
+        texts = []
+        remaining = max_len
+        for item in content:
+            if remaining <= 0:
+                break
+            text = ""
+            if isinstance(item, str):
+                text = item
+            elif isinstance(item, dict):
+                if item.get("type") in ("text", "input_text", "output_text"):
+                    text = item.get("text", "")
+                elif item.get("type") == "tool_use":
+                    text = f"[Tool: {item.get('name', 'unknown')}] {item.get('input', '')}"
+                elif item.get("type") == "tool_result":
+                    text = str(item.get("content", ""))
+            if text:
+                texts.append(text[:remaining])
+                remaining -= len(text)
+        return " ".join(texts)[:max_len]
+    if content is None:
+        return ""
+    return str(content)[:max_len]
+
+
+def extract_response_search_text(payload: dict, max_len: int = SEARCH_TEXT_LIMIT) -> str:
+    payload_type = payload.get("type", "")
+    if payload_type == "message":
+        return _content_text(payload.get("content", []), max_len)
+    if payload_type == "function_call":
+        return payload.get("arguments", "")[:max_len]
+    if payload_type == "function_call_output":
+        return str(payload.get("output", ""))[:max_len]
+    return ""
+
+
 def extract_codex_project_name(record: dict) -> Optional[str]:
     """Return the retrace project bucket from a Codex session_meta record."""
     if record.get("type") != "session_meta":
@@ -216,6 +329,7 @@ def normalize_record(data: dict) -> Optional[dict]:
     if record_type in {"user", "assistant", "tool_result"}:
         message = data.get("message", {})
         content_preview = extract_content_preview(message)
+        search_text = extract_search_text(message)
         role = message.get("role", "")
         tool_name = None
         content = message.get("content", [])
@@ -233,6 +347,7 @@ def normalize_record(data: dict) -> Optional[dict]:
             "role": role,
             "tool_name": tool_name,
             "content_preview": content_preview,
+            "search_text": search_text,
         }
 
     if record_type == "session_meta":
@@ -246,6 +361,7 @@ def normalize_record(data: dict) -> Optional[dict]:
             "role": "",
             "tool_name": "",
             "content_preview": f"cwd={payload.get('cwd', '')} originator={payload.get('originator', '')}",
+            "search_text": f"cwd={payload.get('cwd', '')} originator={payload.get('originator', '')}",
         }
 
     if record_type in {"response_item", "turn_context"}:
@@ -266,6 +382,7 @@ def normalize_record(data: dict) -> Optional[dict]:
                 "role": role,
                 "tool_name": "",
                 "content_preview": _content_text(payload.get("content", [])),
+                "search_text": extract_response_search_text(payload),
             }
 
         if payload_type == "function_call":
@@ -280,6 +397,7 @@ def normalize_record(data: dict) -> Optional[dict]:
                 "role": "assistant",
                 "tool_name": name,
                 "content_preview": args[:300],
+                "search_text": args[:SEARCH_TEXT_LIMIT],
             }
 
         if payload_type == "function_call_output":
@@ -292,6 +410,7 @@ def normalize_record(data: dict) -> Optional[dict]:
                 "role": "tool",
                 "tool_name": "",
                 "content_preview": str(payload.get("output", ""))[:300],
+                "search_text": str(payload.get("output", ""))[:SEARCH_TEXT_LIMIT],
             }
 
         if record_type == "turn_context":
@@ -304,9 +423,34 @@ def normalize_record(data: dict) -> Optional[dict]:
                 "role": "",
                 "tool_name": "",
                 "content_preview": f"cwd={payload.get('cwd', '')}",
+                "search_text": f"cwd={payload.get('cwd', '')}",
             }
 
     return None
+
+
+def should_trigram_index(msg_type: str, search_text: str) -> bool:
+    if msg_type not in TRIGRAM_MESSAGE_TYPES:
+        return False
+    return bool(search_text and len(search_text.strip()) >= 3)
+
+
+def trigram_search_text(search_text: str, msg_type: str) -> str:
+    limit = TRIGRAM_TOOL_RESULT_LIMIT if msg_type == "tool_result" else TRIGRAM_OTHER_LIMIT
+    return search_text[:limit]
+
+
+def insert_trigram_if_selective(conn: sqlite3.Connection, rowid: int, search_text: str,
+                                msg_type: str, role: str, tool_name: str) -> None:
+    if not should_trigram_index(msg_type, search_text):
+        return
+    conn.execute(
+        """
+        INSERT INTO messages_trigram_fts (rowid, search_text, msg_type, role, tool_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (rowid, trigram_search_text(search_text, msg_type), msg_type, role, tool_name or ""),
+    )
 
 
 def index_session_file(conn: sqlite3.Connection, session_file: str,
@@ -378,6 +522,7 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
 
             tool_name = normalized.get("tool_name")
             content_preview = normalized.get("content_preview", "")
+            search_text = normalized.get("search_text", content_preview)
             content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
 
             try:
@@ -385,19 +530,20 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                     INSERT OR IGNORE INTO messages
                     (session_file, line_no, byte_offset, byte_length,
                      uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                     tool_name, content_preview, content_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     tool_name, content_preview, search_text, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (session_file, line_no, byte_offset, line_length,
                       uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                      tool_name, content_preview, content_hash))
+                      tool_name, content_preview, search_text, content_hash))
 
                 if cursor.rowcount > 0:
                     msg_id = cursor.lastrowid
                     indexed_count += 1
                     cursor.execute('''
-                        INSERT INTO messages_fts (rowid, content_preview, msg_type, role, tool_name)
+                        INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
                         VALUES (?, ?, ?, ?, ?)
-                    ''', (msg_id, content_preview, msg_type, role, tool_name or ""))
+                    ''', (msg_id, search_text, msg_type, role, tool_name or ""))
+                    insert_trigram_if_selective(conn, msg_id, search_text, msg_type, role, tool_name or "")
             except sqlite3.IntegrityError:
                 pass
 

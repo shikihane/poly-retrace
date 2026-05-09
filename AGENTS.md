@@ -96,10 +96,13 @@ Because hyphens can also appear in real path components, decoding is best-effort
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --list-sessions --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "query" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --full <id>
 ```
+
+Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确认超时 req_id`, `Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake`, paths, error names, hyphenated terms, or pasted log fragments. Default FTS is still fine for simple English/code tokens.
 
 ### Locate
 
@@ -139,6 +142,6 @@ Because hyphens can also appear in real path components, decoding is best-effort
 | Issue | Solution |
 |-------|----------|
 | "索引数据库不存在" | Run `retrace-index.py --auto --platform codex --project <name> --no-summary` or the matching `claude` command |
-| No results | Check project filter, then try broader search |
+| No results | Check project filter, then retry complex Chinese/code/log queries with `--hybrid` |
 | Query with `-` errors | Search now quotes plain text FTS queries; rebuild if using old scripts |
 | Garbled console output | Run through PowerShell 7; scripts also force UTF-8 stdio |
