@@ -42,6 +42,7 @@ $PYTHON_CMD = "python"
 ```
 
 Use `--no-summary` for normal local use. Summary and analysis commands call `codex exec`, which is slower and spends model calls.
+They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNSANDBOXED_AI=1` only in trusted local environments when legacy unsandboxed behavior is required.
 
 ## List Sessions
 

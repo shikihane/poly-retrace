@@ -62,6 +62,8 @@ Always choose a platform explicitly when you do not want the Codex default:
 
 Use `--no-summary` for routine local indexing. AI summary and analysis paths call `codex exec`.
 
+AI summary and analysis commands run without bypassing sandbox/approval checks by default. Set `RETRACE_ALLOW_UNSANDBOXED_AI=1` only in a trusted local environment if you explicitly need the legacy bypass behavior.
+
 ## Data Storage
 
 | Item | Location |

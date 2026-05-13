@@ -71,9 +71,11 @@ class CodexWindowsSupportTests(unittest.TestCase):
     def test_windows_path_encoding_matches_codex_project_bucket(self):
         from retrace_paths import decode_path, encode_path
 
-        encoded = encode_path(r"D:\Projects\poly-retrace")
-        self.assertEqual(encoded, "D--Projects-poly-retrace")
-        self.assertEqual(decode_path(encoded), r"D:\Projects\poly-retrace")
+        encoded = encode_path(r"D:\Projects\polyretrace")
+        self.assertEqual(encoded, "D--Projects-polyretrace")
+        self.assertEqual(decode_path(encoded), r"D:\Projects\polyretrace")
+
+        self.assertEqual(encode_path(r"D:\Projects\poly-retrace"), "D--Projects-poly-retrace")
 
     def test_codex_session_meta_cwd_selects_project_bucket(self):
         retrace_index = load_script("retrace-index")

@@ -66,6 +66,7 @@ def _get_thread_conn(project_dir: Path) -> sqlite3.Connection:
 
 # 会话摘要配置
 SUMMARY_HEAD_LINES = 100  # 读取前 N 行生成摘要
+ALLOW_UNSANDBOXED_AI = os.environ.get("RETRACE_ALLOW_UNSANDBOXED_AI") == "1"
 
 
 def get_claude_dir() -> Path:
@@ -617,13 +618,23 @@ def generate_session_summary(conn: sqlite3.Connection, session_id: str) -> Optio
     user_prompt = f"Summarize this Claude Code session ({len(messages)} messages):"
 
     try:
+        cmd = [
+            analysis_cmd,
+            "-p",
+            user_prompt,
+            "--system-prompt",
+            system_prompt,
+            "--model",
+            "haiku",
+            "--no-session-persistence",
+            "--output-format",
+            "json",
+        ]
+        if ALLOW_UNSANDBOXED_AI:
+            cmd.append("--dangerously-skip-permissions")
+
         result = subprocess.run(
-            [analysis_cmd, "-p", user_prompt,
-             "--system-prompt", system_prompt,
-             "--model", "haiku",
-             "--no-session-persistence",
-             "--dangerously-skip-permissions",
-             "--output-format", "json"],
+            cmd,
             input=data_str,
             capture_output=True, text=True, encoding="utf-8", timeout=60
         )
@@ -699,13 +710,23 @@ def _generate_summary_worker(args):
     # API 调用时间
     api_start = time.time()
     try:
+        cmd = [
+            analysis_cmd,
+            "-p",
+            user_prompt,
+            "--system-prompt",
+            system_prompt,
+            "--model",
+            "haiku",
+            "--no-session-persistence",
+            "--output-format",
+            "json",
+        ]
+        if ALLOW_UNSANDBOXED_AI:
+            cmd.append("--dangerously-skip-permissions")
+
         result = subprocess.run(
-            [analysis_cmd, "-p", user_prompt,
-             "--system-prompt", system_prompt,
-             "--model", "haiku",
-             "--no-session-persistence",
-             "--dangerously-skip-permissions",
-             "--output-format", "json"],
+            cmd,
             input=data_str, capture_output=True, text=True, encoding="utf-8", timeout=60
         )
         api_time = time.time() - api_start

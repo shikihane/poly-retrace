@@ -4,6 +4,7 @@ retrace_common.py - 共享工具函数
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ SCRIPT_DIR = Path(__file__).parent
 SINGLE_CHUNK_BYTES = 100 * 1024      # 100KB 以下直接处理
 MAX_BYTES_PER_CHUNK = 100 * 1024     # 每个分片最大 100KB
 MAX_PARALLEL = 20                     # 最大并行数
+ALLOW_UNSANDBOXED_AI = os.environ.get("RETRACE_ALLOW_UNSANDBOXED_AI") == "1"
 
 
 def find_analysis_command() -> Optional[str]:
@@ -100,11 +102,17 @@ def call_analysis_model(data: List[Dict], system_prompt: str, user_prompt: str, 
     import time
     start = time.time()
     try:
+        cmd = [
+            codex_cmd,
+            "exec",
+            "--skip-git-repo-check",
+            f"{system_prompt}\n\n{user_prompt}\n\nReturn JSON only.",
+        ]
+        if ALLOW_UNSANDBOXED_AI:
+            cmd.insert(2, "--dangerously-bypass-approvals-and-sandbox")
+
         result = subprocess.run(
-            [codex_cmd, "exec",
-             "--dangerously-bypass-approvals-and-sandbox",
-             "--skip-git-repo-check",
-             f"{system_prompt}\n\n{user_prompt}\n\nReturn JSON only."],
+            cmd,
             input=data_str,
             capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )

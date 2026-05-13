@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "description": "Claude Code session history search and analysis - search, index, and analyze conversation logs with AI-powered insights",
   "author": {
-    "name": "poly-retrace-maintainers"
+    "name": "poly-retrace maintainers"
   },
   "keywords": [
     "memory",

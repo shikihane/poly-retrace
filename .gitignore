@@ -1,0 +1,20 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local retrace outputs and indexes
+retrace-index.db*
+*.jsonl
+chronicle.toon
+chronicle.json
+recovery/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
