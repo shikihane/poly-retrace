@@ -11,7 +11,7 @@ Version: 1.0.0
 
 用法：
     python retrace-recover.py --session <uuid> --file <path> --output <dir>
-    python retrace-recover.py --session xxx --file "scripts/test.sh" --output ./recovery
+    python retrace-recover.py --session xxx --file "src/example.py" --output ./recovery
 """
 
 import json

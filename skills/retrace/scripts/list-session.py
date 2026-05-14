@@ -44,7 +44,7 @@ def get_project_db_path(project_dir: Path) -> Path:
 
 
 def detect_current_project() -> Optional[str]:
-    # Codex path encoding example: D:\Projects\polydev -> D--Projects-polydev
+    # Codex path encoding example: X:\Work\polydev -> X--Work-polydev
     # Worktrees are matched by encoded project prefix.
     """检测当前工作目录对应的项目名称
     """

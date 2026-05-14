@@ -12,20 +12,21 @@ Poly-retrace searches and analyzes Codex or Claude Code conversation history usi
 poly-retrace/
 ├── .claude-plugin/
 │   └── plugin.json
-├── scripts/
-│   ├── retrace_paths.py
-│   ├── platforms/
-│   │   ├── common.py
-│   │   ├── codex.py
-│   │   └── claude.py
-│   ├── retrace_common.py
-│   ├── retrace-locate.py
-│   ├── retrace-index.py
-│   ├── retrace-search.py
-│   ├── retrace-analyze.py
-│   └── retrace-chronicle.py
 ├── skills/
 │   └── retrace/
+│       ├── SKILL.md
+│       └── scripts/
+│           ├── retrace_paths.py
+│           ├── platforms/
+│           │   ├── common.py
+│           │   ├── codex.py
+│           │   └── claude.py
+│           ├── retrace_common.py
+│           ├── retrace-locate.py
+│           ├── retrace-index.py
+│           ├── retrace-search.py
+│           ├── retrace-analyze.py
+│           └── retrace-chronicle.py
 └── AGENTS.md
 ```
 
@@ -43,13 +44,45 @@ No bash compatibility is required for normal usage.
 
 ### Script Path
 
-All scripts should be called via `$env:RETRACE_SCRIPTS`:
+All runtime scripts must live under `skills/retrace/scripts`. After loading the skill, call scripts via the skill-local `$env:RETRACE_SCRIPTS`:
 
 ```powershell
-$env:RETRACE_SCRIPTS = "D:\Projects\poly-retrace\scripts"
+Set-Location .\skills\retrace
+$env:RETRACE_SCRIPTS = Join-Path (Get-Location) "scripts"
 $PYTHON_CMD = "python"
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query"
 ```
+
+### Skill Installation
+
+Do not assume one skill directory covers all clients. When installing or refreshing this skill locally, update every runtime that may provide slash-command or skill autocomplete:
+
+| Client | Skill directory |
+|--------|-----------------|
+| Claude Code | `$HOME\.claude\skills\retrace` |
+| Codex Desktop | `$HOME\.codex\skills\retrace` |
+| Agent skill autocomplete | `$HOME\.agents\skills\retrace` |
+
+For this Windows setup, also check both user-home aliases when they exist:
+
+- `C:\Users\式羽\...`
+- `C:\Users\shikihane\...`
+
+The `SKILL.md` frontmatter name must be lowercase and match the directory:
+
+```yaml
+name: retrace
+```
+
+After copying, verify the installed copy, not just the repository source:
+
+```powershell
+pwsh -NoLogo -NoProfile -File "$HOME\.claude\skills\retrace\scripts\validate-skill.ps1"
+python "$HOME\.claude\skills\retrace\scripts\retrace-search.py" --version
+Get-Content "$HOME\.claude\skills\retrace\SKILL.md" -TotalCount 3
+```
+
+If `/retrace` does not appear in autocomplete, first check whether the UI is reading `.claude\skills`, `.codex\skills`, or `.agents\skills`; then restart the client or open a new session to clear autocomplete caches.
 
 ### Index Before Search
 
@@ -79,7 +112,7 @@ Each platform keeps its own project index root. Do not mix Codex and Claude inde
 
 Windows paths are encoded with the drive separator as `--` and path separators as `-`:
 
-`D:\Projects\poly-retrace` -> `D--Projects-poly-retrace`
+`X:\Work\example-project` -> `X--Work-example-project`
 
 Because hyphens can also appear in real path components, decoding is best-effort unless a Codex `session_meta.payload.cwd` record is available.
 

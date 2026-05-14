@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
+SCRIPTS = ROOT / "skills" / "retrace" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -71,11 +71,11 @@ class CodexWindowsSupportTests(unittest.TestCase):
     def test_windows_path_encoding_matches_codex_project_bucket(self):
         from retrace_paths import decode_path, encode_path
 
-        encoded = encode_path(r"D:\Projects\polyretrace")
-        self.assertEqual(encoded, "D--Projects-polyretrace")
-        self.assertEqual(decode_path(encoded), r"D:\Projects\polyretrace")
+        encoded = encode_path(r"X:\Work\exampleproject")
+        self.assertEqual(encoded, "X--Work-exampleproject")
+        self.assertEqual(decode_path(encoded), r"X:\Work\exampleproject")
 
-        self.assertEqual(encode_path(r"D:\Projects\poly-retrace"), "D--Projects-poly-retrace")
+        self.assertEqual(encode_path(r"X:\Work\example-project"), "X--Work-example-project")
 
     def test_codex_session_meta_cwd_selects_project_bucket(self):
         retrace_index = load_script("retrace-index")
@@ -84,11 +84,11 @@ class CodexWindowsSupportTests(unittest.TestCase):
             "type": "session_meta",
             "payload": {
                 "id": "019e0b0a-0483-7e02-ae36-ce22111452f5",
-                "cwd": r"D:\Projects\poly-retrace",
+                "cwd": r"X:\Work\example-project",
             },
         }
         project = retrace_index.extract_codex_project_name(record)
-        self.assertEqual(project, "D--Projects-poly-retrace")
+        self.assertEqual(project, "X--Work-example-project")
 
     def test_codex_response_items_are_indexed_with_text_and_tool_names(self):
         retrace_index = load_script("retrace-index")
@@ -122,9 +122,38 @@ class CodexWindowsSupportTests(unittest.TestCase):
 
     def test_windows_examples_prefer_pwsh7_not_bash(self):
         skill = (ROOT / "skills" / "retrace" / "SKILL.md").read_text(encoding="utf-8")
+        examples = ROOT / "skills" / "retrace" / "examples"
 
         self.assertIn("pwsh", skill.lower())
         self.assertNotIn("```bash", skill)
+        self.assertFalse(list(examples.glob("*.sh")))
+        self.assertTrue(list(examples.glob("*.ps1")))
+        self.assertFalse(list((ROOT / "skills" / "retrace").rglob("*.sh")))
+
+    def test_retrace_runtime_scripts_are_packaged_inside_skill(self):
+        expected_scripts = [
+            "retrace-index.py",
+            "retrace-search.py",
+            "retrace-analyze.py",
+            "retrace-chronicle.py",
+            "retrace-locate.py",
+            "retrace-recover.py",
+            "retrace_paths.py",
+            "retrace_common.py",
+        ]
+
+        for script_name in expected_scripts:
+            self.assertTrue((SCRIPTS / script_name).is_file(), script_name)
+
+    def test_skill_docs_do_not_reference_personal_or_repo_absolute_script_paths(self):
+        skill = (ROOT / "skills" / "retrace" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertNotIn(r"E:\Heyang3", skill)
+        self.assertNotIn(r"D:\Projects", skill)
+        self.assertNotIn(r"C:\Users", skill)
+        self.assertNotIn(r"\poly-retrace\scripts", skill)
+        self.assertIn("Set-Location <loaded-retrace-skill-directory>", skill)
+        self.assertIn('Join-Path (Get-Location) "scripts"', skill)
 
     def test_search_escapes_hyphenated_plain_text_for_fts(self):
         retrace_search = load_script("retrace-search")

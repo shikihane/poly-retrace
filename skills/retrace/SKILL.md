@@ -1,5 +1,5 @@
 ---
-name: Retrace
+name: retrace
 description: This skill should be used when the user asks to "find past conversations", "recall what was done", "search history", "look up previous work", "how did we handle X", "what was that implementation", "find similar code", "search session", "analyze conversation history", "recover file", "restore previous version", or mentions terms like "earlier", "before", "previously", "last time", "history", "past work".
 version: 0.3.0
 ---
@@ -10,6 +10,7 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 
 ## Architecture
 
+- Runtime scripts are packaged inside this skill under `scripts/`. Do not point `RETRACE_SCRIPTS` at a repository-level or user-specific path.
 - Codex sessions: `$env:CODEX_HOME\sessions\**\*.jsonl` and `$env:CODEX_HOME\archived_sessions\*.jsonl`; default home is `$HOME\.codex`.
 - Codex indexes: `$env:CODEX_HOME\projects\<encoded-cwd>\retrace-index.db`.
 - Claude Code sessions and indexes: `$env:CLAUDE_HOME\projects\<encoded-cwd>\*.jsonl` and `retrace-index.db`; default home is `$HOME\.claude`.
@@ -29,8 +30,11 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 
 ## PowerShell Setup
 
+Run commands from the loaded `retrace` skill directory, where this `SKILL.md` lives.
+
 ```powershell
-$env:RETRACE_SCRIPTS = "D:\Projects\poly-retrace\scripts"
+Set-Location <loaded-retrace-skill-directory>
+$env:RETRACE_SCRIPTS = Join-Path (Get-Location) "scripts"
 $PYTHON_CMD = "python"
 ```
 

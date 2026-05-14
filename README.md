@@ -25,7 +25,7 @@ Pass `--platform codex` or `--platform claude` explicitly. Codex is the default 
 
 Windows paths are encoded with the drive separator as `--` and path separators as `-`:
 
-`D:\Projects\poly-retrace` -> `D--Projects-poly-retrace`.
+`X:\Work\example-project` -> `X--Work-example-project`.
 
 Hyphens can appear in real path components, so decoding is best-effort unless a Codex `session_meta.payload.cwd` record is available.
 
@@ -34,7 +34,8 @@ Hyphens can appear in real path components, so decoding is best-effort unless a 
 ```
 poly-retrace/
 |-- .claude-plugin/plugin.json
-|-- scripts/
+|-- skills/retrace/SKILL.md       # skill entry point
+|-- skills/retrace/scripts/
 |   |-- retrace_paths.py          # compatibility facade over platforms/
 |   |-- retrace_common.py         # shared helpers (search, chunking, AI calls)
 |   |-- platforms/
@@ -49,7 +50,6 @@ poly-retrace/
 |   |-- retrace-recover.py        # recover file versions from history
 |   |-- list-session.py
 |   |-- clean-index.py
-|-- skills/retrace/SKILL.md       # skill entry point
 |-- tests/
 |-- AGENTS.md
 ```
@@ -59,7 +59,7 @@ poly-retrace/
 This project targets a Windows environment and uses PowerShell 7 examples.
 
 ```powershell
-$env:RETRACE_SCRIPTS = "D:\Projects\poly-retrace\scripts"
+$env:RETRACE_SCRIPTS = Join-Path (Get-Location) "skills\retrace\scripts"
 $PYTHON_CMD = "python"
 ```
 
@@ -167,7 +167,7 @@ Chronicle preserves code snippets, shell / git / npm commands, file paths touche
 Reconstruct file versions from a session when edits were not committed to git. Trusts only full `Write`, full `Read`, and full `cat`-style outputs.
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" --platform codex --session <uuid> --project poly-retrace --file "scripts\retrace-index.py" --output .\recovery
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" --platform codex --session <uuid> --project poly-retrace --file "skills\retrace\scripts\retrace-index.py" --output .\recovery
 ```
 
 ## Skill entry point

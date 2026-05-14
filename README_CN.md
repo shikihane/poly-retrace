@@ -25,7 +25,7 @@ English version: [README.md](./README.md).
 
 Windows 路径中，盘符分隔符会被替换成 `--`，路径分隔符替换成 `-`：
 
-`D:\Projects\poly-retrace` -> `D--Projects-poly-retrace`。
+`X:\Work\example-project` -> `X--Work-example-project`。
 
 由于真实路径也可能包含连字符，反向解码是尽力而为的，除非 Codex 的 `session_meta.payload.cwd` 提供了原始路径。
 
@@ -34,7 +34,8 @@ Windows 路径中，盘符分隔符会被替换成 `--`，路径分隔符替换�
 ```
 poly-retrace/
 |-- .claude-plugin/plugin.json
-|-- scripts/
+|-- skills/retrace/SKILL.md       # 技能入口
+|-- skills/retrace/scripts/
 |   |-- retrace_paths.py          # 对外兼容层，封装 platforms/
 |   |-- retrace_common.py         # 共享工具（搜索、分块、AI 调用）
 |   |-- platforms/
@@ -49,7 +50,6 @@ poly-retrace/
 |   |-- retrace-recover.py        # 从历史恢复文件版本
 |   |-- list-session.py
 |   |-- clean-index.py
-|-- skills/retrace/SKILL.md       # 技能入口
 |-- tests/
 |-- AGENTS.md
 ```
@@ -59,7 +59,7 @@ poly-retrace/
 项目面向 Windows 环境，以下示例使用 PowerShell 7：
 
 ```powershell
-$env:RETRACE_SCRIPTS = "D:\Projects\poly-retrace\scripts"
+$env:RETRACE_SCRIPTS = Join-Path (Get-Location) "skills\retrace\scripts"
 $PYTHON_CMD = "python"
 ```
 
@@ -167,7 +167,7 @@ Chronicle 会保留：代码片段、shell / git / npm 命令、涉及的文件�
 当文件修改没进 git 时，从会话日志中重建版本。只信任完整 `Write`、完整 `Read`，以及 `cat` 类完整输出。
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" --platform codex --session <uuid> --project poly-retrace --file "scripts\retrace-index.py" --output .\recovery
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" --platform codex --session <uuid> --project poly-retrace --file "skills\retrace\scripts\retrace-index.py" --output .\recovery
 ```
 
 ## 技能入口

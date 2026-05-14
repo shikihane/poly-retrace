@@ -16,7 +16,7 @@ The chronicle command extracts key events from a Claude Code session and outputs
 | Type | Description | Example Content |
 |------|-------------|-----------------|
 | `code` | Code snippets, functions, fixes | `def process(): pass` |
-| `cmd` | Bash/git/npm commands | `git checkout -b feature/auth` |
+| `cmd` | Shell/git/npm commands | `git checkout -b feature/auth` |
 | `file` | File operations | `created:src/auth.py` |
 | `error` | Error messages, stack traces | `TypeError: cannot read property 'x'` |
 | `decision` | Technical choices | `Choose SQLite over PostgreSQL` |
@@ -34,7 +34,7 @@ Example: `2026-01-06T14:30:00`
 
 ```
 @events[time,type,content]
-2026-01-06T12:27:48,error,Windows PowerShell runs .sh scripts as file association
+2026-01-06T12:27:48,error,PowerShell command failed because the script path was wrong
 2026-01-06T12:30:10,fix,Modified config to use absolute path
 2026-01-06T14:10:21,cmd,`git checkout -b feature/auth`
 2026-01-06T14:15:33,file,created:src/auth.py
@@ -54,7 +54,7 @@ Use `--json` flag for structured output:
     {
       "time": "2026-01-06T12:27:48",
       "type": "error",
-      "content": "Windows PowerShell runs .sh scripts as file association"
+      "content": "PowerShell command failed because the script path was wrong"
     }
   ]
 }
@@ -64,7 +64,7 @@ Use `--json` flag for structured output:
 
 Chronicle extracts events based on:
 
-1. **Tool calls**: `Bash` → `cmd` type, `Write` → `code`/`file` type
+1. **Tool calls**: shell command tools -> `cmd` type, `Write` -> `code`/`file` type
 2. **Error messages**: Parse tool results for error patterns
 3. **Decision markers**: Identify "choose", "decide", "select" statements
 4. **Mistake indicators**: Detect "oops", "mistake", "wrong", "fix" patterns

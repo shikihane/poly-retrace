@@ -28,12 +28,12 @@ Use recover when:
 
 ## Recovery Command
 
-```bash
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-recover.py" \
-    --session <uuid> \
-    --project <project> \
-    --file <path> \
-    --output ./recovery
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" `
+    --session <uuid> `
+    --project <project> `
+    --file <path> `
+    --output .\recovery
 ```
 
 ### Required Parameters
@@ -50,8 +50,8 @@ $PYTHON_CMD "$RETRACE_SCRIPTS/retrace-recover.py" \
 ```
 ./recovery/
 ├── versions.txt           # Index (TOON format)
-├── filename_v001.sh       # Version 1
-├── filename_v002.sh       # Version 2
+├── filename_v001.py       # Version 1
+├── filename_v002.py       # Version 2
 └── ...
 ```
 
@@ -81,12 +81,12 @@ v002,2026-01-06T15:45:00,Write
 
 ### Recover a script file
 
-```bash
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-recover.py" \
-    --session 550e8400-e29b-41d4-a716-446655440000 \
-    --project polydev \
-    --file "scripts/build.sh" \
-    --output ./recovery
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-recover.py" `
+    --session 550e8400-e29b-41d4-a716-446655440000 `
+    --project polydev `
+    --file "tools\build.ps1" `
+    --output .\recovery
 ```
 
 ### Recover multiple versions

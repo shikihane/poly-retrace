@@ -12,15 +12,16 @@ Poly-retrace enables searching and analyzing Claude Code conversation history us
 poly-retrace/
 ├── .claude-plugin/
 │   └── plugin.json         # Plugin manifest
-├── scripts/
-│   ├── retrace_common.py   # Shared utilities (search, chunking, haiku)
-│   ├── retrace-locate.py   # Locate session files
-│   ├── retrace-index.py    # Build FTS5 index (per-project)
-│   ├── retrace-search.py   # Search with layered output + sessions
-│   ├── retrace-analyze.py  # Query-based analysis
-│   └── retrace-chronicle.py # Full history extraction (TOON)
 ├── skills/
 │   └── retrace/            # Main search skill
+│       ├── SKILL.md
+│       └── scripts/
+│           ├── retrace_common.py
+│           ├── retrace-locate.py
+│           ├── retrace-index.py
+│           ├── retrace-search.py
+│           ├── retrace-analyze.py
+│           └── retrace-chronicle.py
 └── CLAUDE.md               # This file
 ```
 
@@ -28,31 +29,27 @@ poly-retrace/
 
 ### Script Path - MANDATORY
 
-**All scripts must be called via `$RETRACE_SCRIPTS` variable:**
+**All scripts must live under the loaded skill directory and be called via `$RETRACE_SCRIPTS`:**
 
-```bash
-RETRACE_SCRIPTS="/path/to/poly-retrace/scripts"
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query"
+```powershell
+Set-Location .\skills\retrace
+$env:RETRACE_SCRIPTS = Join-Path (Get-Location) "scripts"
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query"
 ```
 
 ### Python Command - Windows Compatibility
 
-```bash
-# Always detect Python command first
-if command -v python3 &> /dev/null; then
-    PYTHON_CMD="python3"
-elif command -v python &> /dev/null; then
-    PYTHON_CMD="python"
-fi
+```powershell
+$PYTHON_CMD = "python"
 ```
 
 ### Index Before Search
 
 **Always ensure index exists before searching:**
 
-```bash
+```powershell
 # Check project index
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --project <name>
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --project <name>
 ```
 
 ## Data Storage (v2.0)
@@ -66,7 +63,7 @@ $PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --project <name>
 
 ### Path Encoding
 
-Directory paths are encoded: `C:\Projects\myapp` → `C-Projects-myapp`
+Directory paths are encoded: `X:\Work\myapp` -> `X--Work-myapp`
 
 ## Script Reference
 
@@ -82,55 +79,55 @@ Provides:
 
 ### retrace-index.py (v2.0)
 
-```bash
+```powershell
 # Index all projects (incremental)
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto
 
 # Index specific project
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --project polydev
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --project polydev
 
 # Rebuild from scratch
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --auto --no-incremental
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --no-incremental
 
 # View stats
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-index.py" --stats
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
 ```
 
 ### retrace-search.py (v2.0)
 
-```bash
+```powershell
 # List all sessions
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --list-sessions --project polydev
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --list-sessions --project polydev
 
 # Basic search
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query" --project polydev
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query" --project polydev
 
 # Search within session
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query" --session <uuid>
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query" --session <uuid>
 
 # With filters
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" "query" \
-    --type tool_result \
-    --tool Bash \
-    --project polydev \
-    --since 2025-01-01 \
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query" `
+    --type tool_result `
+    --tool shell_command `
+    --project polydev `
+    --since 2025-01-01 `
     --limit 10
 
 # Get context
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --context <id> --before 5 --after 5
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 
 # Full content
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-search.py" --full <id>
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --full <id>
 ```
 
 ### retrace-analyze.py
 
-```bash
+```powershell
 # Search and analyze (auto-chunks large data)
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-analyze.py" "error" --prompt "summarize errors" --project polydev
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "summarize errors" --project polydev
 
 # JSON output
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-analyze.py" "bug" --prompt "classify" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --prompt "classify" --json
 ```
 
 **Parameters:**
@@ -143,12 +140,12 @@ $PYTHON_CMD "$RETRACE_SCRIPTS/retrace-analyze.py" "bug" --prompt "classify" --js
 
 Full history extraction with strong constraints. Outputs TOON format.
 
-```bash
+```powershell
 # Extract all history from project
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-chronicle.py" --project polydev
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --project polydev
 
 # JSON output
-$PYTHON_CMD "$RETRACE_SCRIPTS/retrace-chronicle.py" --project polydev --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --project polydev --json
 ```
 
 **Extracts:**
