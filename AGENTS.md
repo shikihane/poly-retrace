@@ -1,6 +1,6 @@
-# AGENTS.md - Poly-Retrace Plugin
+# AGENTS.md - Poly-Retrace Skill
 
-Codex and Claude Code session history search and analysis plugin.
+Codex and Claude Code session history search and analysis skill.
 
 ## Overview
 
@@ -10,8 +10,6 @@ Poly-retrace searches and analyzes Codex or Claude Code conversation history usi
 
 ```
 poly-retrace/
-├── .claude-plugin/
-│   └── plugin.json
 ├── skills/
 │   └── retrace/
 │       ├── SKILL.md
@@ -29,6 +27,8 @@ poly-retrace/
 │           └── retrace-chronicle.py
 └── AGENTS.md
 ```
+
+This project is distributed as a standalone skill. Do not publish or deploy it as a Claude plugin.
 
 ## Critical Rules
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from retrace_common import call_analysis_model, chunk_by_size, SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
-from retrace_paths import configure_utf8_stdio, get_platform, iter_session_files
+from retrace_paths import configure_utf8_stdio, find_session_files, get_platform
 
 configure_utf8_stdio()
 
@@ -55,25 +55,16 @@ def find_project_dir(project_name: str, platform: str = "codex") -> Optional[Pat
 
 def find_session_file(session_uuid: str, project_name: str, platform: str = "codex") -> Optional[Path]:
     """根据 session UUID 查找 JSONL 文件"""
-    for jsonl in iter_session_files(platform):
-        if session_uuid in jsonl.stem:
+    for jsonl in find_session_files(session_uuid, platform):
+        if not project_name or project_name.lower() in str(jsonl).lower():
             return jsonl
-        try:
-            with open(jsonl, "r", encoding="utf-8") as f:
-                first = json.loads(f.readline())
-            payload = first.get("payload", {})
-            if first.get("type") == "session_meta" and payload.get("id") == session_uuid:
-                if not project_name or project_name.lower() in payload.get("cwd", "").lower():
-                    return jsonl
-        except Exception:
-            pass
 
     project_dir = find_project_dir(project_name, platform)
     if not project_dir:
         return None
 
     # 查找包含该 UUID 的 JSONL 文件
-    for jsonl in project_dir.glob("*.jsonl"):
+    for jsonl in project_dir.rglob("*.jsonl"):
         if session_uuid in jsonl.stem:
             return jsonl
 

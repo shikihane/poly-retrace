@@ -112,12 +112,14 @@ def main():
     parser.add_argument("query", help="搜索关键词")
     parser.add_argument("--prompt", "-p", default="analyze and summarize", help="分析任务")
     parser.add_argument("--project", help="项目名过滤")
+    parser.add_argument("--platform", choices=["codex", "claude"], default="codex",
+                        help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON输出")
     parser.add_argument("--version", "-v", action="version", version=f"retrace-analyze {VERSION}")
     args = parser.parse_args()
 
     print(f"🔍 检索: {args.query}", file=sys.stderr)
-    json_str = search(args.query, args.project)
+    json_str = search(args.query, args.project, args.platform)
     data_size = get_data_size(json_str)
 
     try:

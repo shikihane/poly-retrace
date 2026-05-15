@@ -120,15 +120,12 @@ class CodexWindowsSupportTests(unittest.TestCase):
         self.assertEqual(tool["tool_name"], "shell_command")
         self.assertIn("pwsh", tool["content_preview"])
 
-    def test_windows_examples_prefer_pwsh7_not_bash(self):
+    def test_windows_examples_include_pwsh7_variants(self):
         skill = (ROOT / "skills" / "retrace" / "SKILL.md").read_text(encoding="utf-8")
         examples = ROOT / "skills" / "retrace" / "examples"
 
         self.assertIn("pwsh", skill.lower())
-        self.assertNotIn("```bash", skill)
-        self.assertFalse(list(examples.glob("*.sh")))
         self.assertTrue(list(examples.glob("*.ps1")))
-        self.assertFalse(list((ROOT / "skills" / "retrace").rglob("*.sh")))
 
     def test_retrace_runtime_scripts_are_packaged_inside_skill(self):
         expected_scripts = [

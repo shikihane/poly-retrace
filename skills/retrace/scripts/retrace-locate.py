@@ -26,7 +26,16 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from retrace_paths import configure_utf8_stdio, decode_path, encode_path, get_platform, get_platforms, iter_session_files
+from retrace_paths import (
+    configure_utf8_stdio,
+    decode_path,
+    encode_path,
+    find_session_files,
+    get_platform,
+    get_platforms,
+    iter_session_files,
+    read_first_json_record,
+)
 
 configure_utf8_stdio()
 
@@ -69,8 +78,10 @@ def get_current_session_id() -> Optional[str]:
 
 def find_session_file(project_dir: Path, session_id: str) -> Optional[Path]:
     """在项目目录中查找指定会话的 JSONL 文件"""
-    session_file = project_dir / f"{session_id}.jsonl"
-    return session_file if session_file.exists() else None
+    for session_file in find_project_session_files(project_dir):
+        if session_id in session_file.stem:
+            return session_file
+    return None
 
 
 def get_codex_session_meta(session_file: Path) -> Dict:
@@ -91,14 +102,26 @@ def get_codex_session_meta(session_file: Path) -> Dict:
     return {}
 
 
+def get_session_cwd(session_file: Path, platform: str = "codex") -> str:
+    """Return the cwd recorded by a session file when available."""
+    if platform == "claude":
+        first_record = read_first_json_record(session_file)
+        return first_record.get("cwd", "")
+    return get_codex_session_meta(session_file).get("cwd", "")
+
+
+def find_project_session_files(project_dir: Path) -> List[Path]:
+    """Return JSONL session files under a project directory, including subagents."""
+    if not project_dir.exists():
+        return []
+    return sorted(project_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 def find_platform_session_file(session_id: str, platform: str = "codex") -> Optional[Path]:
     """扫描指定平台会话根目录查找 session 文件。"""
-    for session_file in iter_session_files(platform):
-        if session_id in session_file.stem:
-            return session_file
-        meta = get_codex_session_meta(session_file)
-        if meta.get("id") == session_id:
-            return session_file
+    matches = find_session_files(session_id, platform)
+    if matches:
+        return matches[0]
     return None
 
 
@@ -106,7 +129,7 @@ def find_latest_session(project_dir: Path) -> Optional[Path]:
     """找到项目目录中最近修改的 JSONL 文件"""
     if not project_dir.exists():
         return None
-    jsonl_files = list(project_dir.glob("*.jsonl"))
+    jsonl_files = find_project_session_files(project_dir)
     if not jsonl_files:
         return None
     jsonl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
@@ -124,8 +147,11 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
         for retrace_platform in get_platforms(platform):
             platform_file = find_platform_session_file(session_id, retrace_platform.name)
             if platform_file:
-                meta = get_codex_session_meta(platform_file)
-                project_name = encode_path(meta.get("cwd", "")) if meta.get("cwd") else platform_file.parent.name
+                cwd = get_session_cwd(platform_file, retrace_platform.name)
+                if cwd:
+                    project_name = encode_path(cwd)
+                else:
+                    project_name = platform_file.relative_to(retrace_platform.projects_dir).parts[0]
                 result = _build_result(session_id, platform_file, retrace_platform.projects_dir / project_name)
                 result["platform"] = retrace_platform.name
                 return result
@@ -220,10 +246,12 @@ def list_projects(platform: str = "codex") -> List[Dict]:
         projects_dir.mkdir(parents=True, exist_ok=True)
 
         for session_file in iter_session_files(retrace_platform.name):
-            meta = get_codex_session_meta(session_file)
-            cwd = meta.get("cwd")
+            cwd = get_session_cwd(session_file, retrace_platform.name)
             if retrace_platform.name == "claude":
-                name = session_file.parent.name
+                try:
+                    name = session_file.relative_to(projects_dir).parts[0]
+                except ValueError:
+                    name = session_file.parent.name
                 cwd = cwd or decode_path(name, retrace_platform.name)
             elif cwd:
                 name = encode_path(cwd)
@@ -289,7 +317,7 @@ def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
     summaries = get_session_summaries(project_dir)
 
     sessions = []
-    for f in sorted(project_dir.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
+    for f in find_project_session_files(project_dir):
         stat = f.stat()
         session_id = f.stem
         info = summaries.get(session_id, {})

@@ -11,17 +11,17 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 ## Architecture
 
 - Runtime scripts are packaged inside this skill under `scripts/`. Do not point `RETRACE_SCRIPTS` at a repository-level or user-specific path.
-- Codex sessions: `$env:CODEX_HOME\sessions\**\*.jsonl` and `$env:CODEX_HOME\archived_sessions\*.jsonl`; default home is `$HOME\.codex`.
-- Codex indexes: `$env:CODEX_HOME\projects\<encoded-cwd>\retrace-index.db`.
-- Claude Code sessions and indexes: `$env:CLAUDE_HOME\projects\<encoded-cwd>\*.jsonl` and `retrace-index.db`; default home is `$HOME\.claude`.
+- Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
+- Codex indexes: `~/.codex/projects/<encoded-cwd>/retrace-index.db`.
+- Claude Code sessions and indexes: `~/.claude/projects/<encoded-cwd>/*.jsonl`, `~/.claude/projects/<encoded-cwd>/*/subagents/*.jsonl`, and `retrace-index.db`, overridable with `CLAUDE_HOME`.
 - Platform selection is mandatory: pass `--platform codex` or `--platform claude`.
-- Windows-first shell: use PowerShell 7 (`pwsh`) examples and commands.
+- Windows-first shell: prefer PowerShell 7 (`pwsh`) on this setup, but Unix `sh` examples are packaged under `examples/`.
 - Platform modules: `platforms/codex.py` and `platforms/claude.py` own platform-specific paths; `platforms/common.py` holds the shared data model.
 - Compatibility facade: `retrace_paths.py` exposes the small public API used by scripts.
 
 ## Core Workflow
 
-1. Set script and Python variables in PowerShell 7.
+1. Set script and Python variables for the current shell.
 2. Ensure the project index exists before searching.
 3. Search with layered output: `stats`, `list`, then `detail`.
 4. Use `--hybrid` proactively for mixed Chinese/code/log queries, especially Chinese phrases plus code symbols, error names, hyphenated terms, paths, or long tool outputs.
@@ -38,11 +38,25 @@ $env:RETRACE_SCRIPTS = Join-Path (Get-Location) "scripts"
 $PYTHON_CMD = "python"
 ```
 
+## Unix Setup
+
+Run commands from the loaded `retrace` skill directory, where this `SKILL.md` lives.
+
+```sh
+RETRACE_SCRIPTS="$(pwd)/scripts"
+PYTHON_CMD="python3"
+```
+
 ## Ensure Index Exists
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+```
+
+```sh
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for normal local use. Summary and analysis commands call `codex exec`, which is slower and spends model calls.
@@ -72,15 +86,15 @@ Prefer `--hybrid` immediately when queries look like `录音确认超时 req_id`
 ## AI-Powered Analysis
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "classify error types" --project poly-retrace
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "query" --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "query" --platform claude --prompt "summarize" --json
 ```
 
 ## Session Chronicle
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
 ## File Recovery

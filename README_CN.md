@@ -15,11 +15,11 @@ English version: [README.md](./README.md).
 
 ## 支持的平台
 
-- Codex 会话：`$env:CODEX_HOME\sessions\**\*.jsonl` 与 `$env:CODEX_HOME\archived_sessions\*.jsonl`（默认 `$HOME\.codex`）。
-- Claude Code 会话：`$env:CLAUDE_HOME\projects\<encoded-cwd>\*.jsonl`（默认 `$HOME\.claude`）。
-- 索引数据库紧挨着会话文件：`...\projects\<encoded-cwd>\retrace-index.db`。
+- Codex 会话：`%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`，以及 `archived_sessions`；默认 home 是 `~/.codex`。
+- Claude Code 会话：`%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`；默认 home 是 `~/.claude`。
+- 索引数据库位于对应平台 home 下的 `projects/<encoded-cwd>/retrace-index.db`。
 
-必须显式传 `--platform codex` 或 `--platform claude`。省略时默认 Codex。
+必须显式传 `--platform codex` 或 `--platform claude`。
 
 ### 路径编码
 
@@ -27,13 +27,16 @@ Windows 路径中，盘符分隔符会被替换成 `--`，路径分隔符替换�
 
 `X:\Work\example-project` -> `X--Work-example-project`。
 
+Unix 路径会去掉开头的 `/`，再把路径分隔符替换成 `-`：
+
+`/home/user/example-project` -> `home-user-example-project`。
+
 由于真实路径也可能包含连字符，反向解码是尽力而为的，除非 Codex 的 `session_meta.payload.cwd` 提供了原始路径。
 
 ## 目录结构
 
 ```
 poly-retrace/
-|-- .claude-plugin/plugin.json
 |-- skills/retrace/SKILL.md       # 技能入口
 |-- skills/retrace/scripts/
 |   |-- retrace_paths.py          # 对外兼容层，封装 platforms/
@@ -56,11 +59,16 @@ poly-retrace/
 
 ## 环境准备
 
-项目面向 Windows 环境，以下示例使用 PowerShell 7：
+项目以 Windows 为主，但 Python 运行脚本和 shell 示例可以在常见 Unix 环境中运行。
 
 ```powershell
 $env:RETRACE_SCRIPTS = Join-Path (Get-Location) "skills\retrace\scripts"
 $PYTHON_CMD = "python"
+```
+
+```sh
+RETRACE_SCRIPTS="$(pwd)/skills/retrace/scripts"
+PYTHON_CMD="python3"
 ```
 
 索引和搜索不需要额外 Python 依赖：现代 Python 自带 SQLite FTS5；若缺失会自动回退到 FTS4。
@@ -79,7 +87,13 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 
 # 查看统计
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
+```
+
+```sh
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
 日常使用建议始终带上 `--no-summary`。只有需要 Codex 生成会话摘要时再去掉它——那条路径会调用模型、比较慢。
@@ -145,8 +159,8 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 ## AI 分析
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "classify error types" --project poly-retrace
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --platform claude --prompt "summarize" --json
 ```
 
 结果集较小时走一次 `codex exec`；较大时会被自动分块并行处理。小结果约 5-7 秒/次，大结果每块约 15-22 秒，最多 20 个并发。
@@ -157,7 +171,7 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
 Chronicle 会保留：代码片段、shell / git / npm 命令、涉及的文件路径、错误与堆栈、技术决策，以及返工原因。
@@ -186,4 +200,4 @@ Chronicle 会保留：代码片段、shell / git / npm 命令、涉及的文件�
 
 ## 版本
 
-插件清单见 `.claude-plugin/plugin.json`。各工具的版本号写在对应脚本文件头。
+本项目仅作为独立 skill 分发。版本信息见 `skills/retrace/SKILL.md` 和各脚本文件头。

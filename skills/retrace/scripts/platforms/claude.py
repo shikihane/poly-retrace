@@ -14,7 +14,7 @@ class ClaudePlatform(RetracePlatform):
                 continue
             for project_dir in root.iterdir():
                 if project_dir.is_dir():
-                    yield from project_dir.glob("*.jsonl")
+                    yield from project_dir.rglob("*.jsonl")
 
 
 def create_platform() -> RetracePlatform:

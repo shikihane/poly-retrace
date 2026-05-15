@@ -571,11 +571,34 @@ def update_session_meta(conn: sqlite3.Connection, session_id: str, session_file:
     row = cursor.fetchone()
 
     if row and row[2] > 0:
+        cursor.execute("SELECT session_file FROM sessions WHERE session_id = ?", (session_id,))
+        existing = cursor.fetchone()
+        canonical_file = choose_canonical_session_file(
+            session_id,
+            existing[0] if existing else "",
+            session_file,
+        )
         cursor.execute('''
             INSERT OR REPLACE INTO sessions (session_id, session_file, start_time, end_time, message_count)
             VALUES (?, ?, ?, ?, ?)
-        ''', (session_id, session_file, row[0], row[1], row[2]))
+        ''', (session_id, canonical_file, row[0], row[1], row[2]))
         conn.commit()
+
+
+def choose_canonical_session_file(session_id: str, current_file: str, candidate_file: str) -> str:
+    """Prefer the main session JSONL over subagent sidecar files."""
+    if not current_file:
+        return candidate_file
+
+    def priority(path: str) -> tuple[int, str]:
+        p = Path(path)
+        if p.stem == session_id and "subagents" not in p.parts:
+            return (0, path)
+        if "subagents" in p.parts:
+            return (2, path)
+        return (1, path)
+
+    return min((current_file, candidate_file), key=priority)
 
 
 def generate_session_summary(conn: sqlite3.Connection, session_id: str) -> Optional[str]:
@@ -765,7 +788,7 @@ def index_single_project(project_dir: Path, incremental: bool = True,
     total = 0
     all_session_ids = set()
 
-    for session_file in project_dir.glob("*.jsonl"):
+    for session_file in project_dir.rglob("*.jsonl"):
         count, session_ids = index_session_file(conn, str(session_file), incremental)
         all_session_ids.update(session_ids)
         if count > 0:
@@ -815,7 +838,10 @@ def index_single_project(project_dir: Path, incremental: bool = True,
 def detect_session_project(session_file: Path, platform: RetracePlatform) -> Optional[str]:
     """Read a session file and return its encoded project bucket."""
     if platform.name == "claude":
-        return session_file.parent.name
+        try:
+            return session_file.relative_to(platform.projects_dir).parts[0]
+        except ValueError:
+            return session_file.parent.name
 
     try:
         with open(session_file, "r", encoding="utf-8") as f:

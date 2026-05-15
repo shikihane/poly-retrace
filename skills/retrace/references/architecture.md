@@ -12,6 +12,9 @@ Location: `~/.claude/projects/<encoded-path>/`
 
 Session files are named by UUID: `<uuid>.jsonl`
 
+Claude Code subagent sessions are stored under the parent session directory:
+`~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
+
 Each session file contains Claude Code conversation history with tool usage, file modifications, and AI responses.
 
 ### Index Database

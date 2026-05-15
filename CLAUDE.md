@@ -1,6 +1,6 @@
-# CLAUDE.md - Poly-Retrace Plugin
+# CLAUDE.md - Poly-Retrace Skill
 
-Claude Code session history search and analysis plugin.
+Claude Code session history search and analysis skill.
 
 ## Overview
 
@@ -10,8 +10,6 @@ Poly-retrace enables searching and analyzing Claude Code conversation history us
 
 ```
 poly-retrace/
-├── .claude-plugin/
-│   └── plugin.json         # Plugin manifest
 ├── skills/
 │   └── retrace/            # Main search skill
 │       ├── SKILL.md

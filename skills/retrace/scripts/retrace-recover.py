@@ -23,7 +23,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
-from retrace_paths import configure_utf8_stdio, encode_path, get_platform, iter_session_files
+from retrace_paths import configure_utf8_stdio, encode_path, find_session_files, get_platform
 
 configure_utf8_stdio()
 
@@ -251,19 +251,14 @@ def save_versions(versions: List[Dict], target_file: str, output_dir: Path):
 
 def find_session_file(session_uuid: str, project_dir: Path, platform: str = "codex") -> Optional[Path]:
     """查找会话文件"""
-    for f in iter_session_files(platform):
-        if session_uuid in f.name:
-            return f
-        try:
-            with open(f, "r", encoding="utf-8") as handle:
-                first = json.loads(handle.readline())
-            payload = first.get("payload", {})
-            if first.get("type") == "session_meta" and payload.get("id") == session_uuid:
-                return f
-        except Exception:
-            pass
+    matches = [
+        f for f in find_session_files(session_uuid, platform)
+        if project_dir in f.parents or f.parent == project_dir
+    ]
+    if matches:
+        return matches[0]
     # 直接匹配 UUID
-    for f in project_dir.glob('*.jsonl'):
+    for f in project_dir.rglob('*.jsonl'):
         if session_uuid in f.name:
             return f
     return None

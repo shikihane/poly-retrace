@@ -15,11 +15,11 @@ Chinese version: [README_CN.md](./README_CN.md).
 
 ## Platforms
 
-- Codex sessions: `$env:CODEX_HOME\sessions\**\*.jsonl` and `$env:CODEX_HOME\archived_sessions\*.jsonl` (default `$HOME\.codex`).
-- Claude Code sessions: `$env:CLAUDE_HOME\projects\<encoded-cwd>\*.jsonl` (default `$HOME\.claude`).
-- Indexes live next to the sessions they describe: `...\projects\<encoded-cwd>\retrace-index.db`.
+- Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
+- Claude Code sessions: `%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`; default home is `~/.claude`.
+- Indexes live under each platform home at `projects/<encoded-cwd>/retrace-index.db`.
 
-Pass `--platform codex` or `--platform claude` explicitly. Codex is the default if omitted.
+Pass `--platform codex` or `--platform claude` explicitly.
 
 ### Path encoding
 
@@ -27,13 +27,16 @@ Windows paths are encoded with the drive separator as `--` and path separators a
 
 `X:\Work\example-project` -> `X--Work-example-project`.
 
+Unix paths are encoded by stripping the leading slash and replacing path separators with `-`:
+
+`/home/user/example-project` -> `home-user-example-project`.
+
 Hyphens can appear in real path components, so decoding is best-effort unless a Codex `session_meta.payload.cwd` record is available.
 
 ## Layout
 
 ```
 poly-retrace/
-|-- .claude-plugin/plugin.json
 |-- skills/retrace/SKILL.md       # skill entry point
 |-- skills/retrace/scripts/
 |   |-- retrace_paths.py          # compatibility facade over platforms/
@@ -56,11 +59,16 @@ poly-retrace/
 
 ## Setup
 
-This project targets a Windows environment and uses PowerShell 7 examples.
+This project is Windows-first, but the Python runtime scripts and shell examples are portable across normal Unix environments.
 
 ```powershell
 $env:RETRACE_SCRIPTS = Join-Path (Get-Location) "skills\retrace\scripts"
 $PYTHON_CMD = "python"
+```
+
+```sh
+RETRACE_SCRIPTS="$(pwd)/skills/retrace/scripts"
+PYTHON_CMD="python3"
 ```
 
 No external Python dependencies are required for indexing and searching; SQLite FTS5 ships with modern Python, and the scripts fall back to FTS4 if FTS5 is missing.
@@ -79,7 +87,13 @@ Always ensure the index is current before searching.
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 
 # Stats
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
+```
+
+```sh
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
 Use `--no-summary` for routine local indexing. Drop it only when you want Codex-generated session summaries; that path spends model calls.
@@ -145,8 +159,8 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 ## Analyze
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "classify error types" --project poly-retrace
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --platform claude --prompt "summarize" --json
 ```
 
 Small result sets go through a single `codex exec` call. Large sets are chunked in parallel; expect roughly 5-7 seconds per small call and 15-22 seconds per chunk, with up to 20 concurrent chunks.
@@ -157,7 +171,7 @@ Single-session history extraction with strong prompt constraints. Emits TOON by 
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
 Chronicle preserves code snippets, shell / git / npm commands, file paths touched, errors and stack traces, technical decisions, and rework reasons.
@@ -186,4 +200,4 @@ Reconstruct file versions from a session when edits were not committed to git. T
 
 ## Version
 
-Plugin manifest: `.claude-plugin/plugin.json`. See individual script headers for per-tool versions.
+This project is distributed as a standalone skill. See `skills/retrace/SKILL.md` and individual script headers for versions.

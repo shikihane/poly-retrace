@@ -32,12 +32,13 @@ def get_data_size(json_str: str) -> int:
     return len(json_str.encode('utf-8'))
 
 
-def search(query: str, project: str = None) -> str:
+def search(query: str, project: str = None, platform: str = "codex") -> str:
     """执行搜索，返回原始 JSON 字符串"""
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "retrace-search.py"),
         query,
+        "--platform", platform,
         "--level", "detail",
         "--limit", "0",
         "--json"
@@ -51,11 +52,12 @@ def search(query: str, project: str = None) -> str:
     return result.stdout or "[]"
 
 
-def search_all(project: str = None) -> str:
+def search_all(project: str = None, platform: str = "codex") -> str:
     """获取所有记录，返回原始 JSON 字符串"""
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "retrace-search.py"),
+        "--platform", platform,
         "--level", "detail",
         "--limit", "0",
         "--json"
