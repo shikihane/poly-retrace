@@ -61,6 +61,10 @@ def main() -> int:
         "retrace_common.py",
         "validate-skill.py",
         "validate-skill.ps1",
+        "platforms/common.py",
+        "platforms/codex.py",
+        "platforms/claude.py",
+        "platforms/pi.py",
     ):
         check_file(SCRIPT_DIR / name, name, errors)
 

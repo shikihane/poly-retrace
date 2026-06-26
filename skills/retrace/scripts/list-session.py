@@ -26,7 +26,7 @@ from retrace_paths import configure_utf8_stdio, encode_path, get_platform
 
 configure_utf8_stdio()
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def get_claude_dir() -> Path:
@@ -243,7 +243,7 @@ def main():
     )
     parser.add_argument(
         "--platform",
-        choices=["codex", "claude"],
+        choices=["codex", "claude", "pi"],
         required=True,
         help="会话平台"
     )

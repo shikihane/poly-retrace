@@ -30,7 +30,7 @@ from retrace_paths import configure_utf8_stdio, find_session_files, get_platform
 
 configure_utf8_stdio()
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def get_claude_dir() -> Path:
@@ -184,10 +184,188 @@ def _format_tool_use(tool_name: str, tool_input: Dict) -> str:
         return f"@{tool_name}"
 
 
+def _compact_json_text(value, max_len: int = 1000) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)[:max_len]
+    except TypeError:
+        return str(value)[:max_len]
+
+
+def _pi_content_text(content, include_tool_calls: bool = False) -> str:
+    """Extract text from Pi content blocks for chronicle input."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+
+    texts = []
+    for item in content:
+        if isinstance(item, str):
+            texts.append(item)
+        elif isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type == "text":
+                texts.append(item.get("text", ""))
+            elif item_type == "thinking":
+                thinking = item.get("thinking", "")
+                if thinking:
+                    texts.append(thinking)
+            elif item_type == "image":
+                texts.append(f"[image {item.get('mimeType', '') or item.get('mediaType', '')}]")
+            elif item_type == "toolCall" and include_tool_calls:
+                args_text = _compact_json_text(item.get("arguments", {}))
+                texts.append(f"@{item.get('name', 'unknown')} {args_text}")
+            elif "text" in item:
+                texts.append(str(item.get("text", "")))
+            else:
+                texts.append(_compact_json_text(item))
+    return "\n".join(t for t in texts if t)
+
+
+def _pi_message_metadata_text(message: Dict) -> str:
+    parts = []
+    for key in ("api", "provider", "model", "stopReason", "errorMessage", "toolName", "toolCallId"):
+        value = message.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={value}")
+    if "isError" in message:
+        parts.append(f"isError={message.get('isError')}")
+    for key in ("details", "usage"):
+        value = message.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={_compact_json_text(value)}")
+    return "\n".join(parts)
+
+
+def _join_pi_text(*parts: str) -> str:
+    return "\n".join(part for part in parts if part)
+
+
+def _pi_tool_lines(content) -> List[str]:
+    if not isinstance(content, list):
+        return []
+    lines = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "toolCall":
+            args_text = _compact_json_text(item.get("arguments", {}))
+            lines.append(f"@{item.get('name', 'unknown')} {args_text}")
+    return lines
+
+
 def extract_message(record: Dict, line_num: int) -> Optional[Dict]:
     """从 JSONL 记录中提取消息"""
     msg_type = record.get("type", "")
     timestamp = record.get("timestamp", "")  # 提取时间戳
+
+    # Pi session header and tree entries
+    if msg_type == "session":
+        content = f"cwd={record.get('cwd', '')} version={record.get('version', '')}"
+        return {
+            "line": line_num,
+            "timestamp": timestamp,
+            "type": "session_meta",
+            "role": "system",
+            "content": content[:10000],
+        }
+
+    if msg_type == "message":
+        message = record.get("message", {})
+        role = message.get("role", "")
+        content = message.get("content", "")
+
+        meta_text = _pi_message_metadata_text(message)
+
+        if role == "user":
+            text = _join_pi_text(_pi_content_text(content), meta_text)
+            if text:
+                return {
+                    "line": line_num,
+                    "timestamp": timestamp,
+                    "type": "user",
+                    "role": "user",
+                    "content": text[:10000],
+                }
+
+        if role == "assistant":
+            text = _pi_content_text(content)
+            tool_lines = _pi_tool_lines(content)
+            if tool_lines:
+                text = (text + "\n" if text else "") + "---TOOLS---\n" + "\n".join(tool_lines)
+            text = _join_pi_text(text, meta_text)
+            if text:
+                return {
+                    "line": line_num,
+                    "timestamp": timestamp,
+                    "type": "assistant",
+                    "role": "assistant",
+                    "content": text[:10000],
+                }
+
+        if role == "toolResult":
+            text = _join_pi_text(_pi_content_text(content), meta_text)
+            if text:
+                return {
+                    "line": line_num,
+                    "timestamp": timestamp,
+                    "type": "tool_result",
+                    "role": "tool",
+                    "tool": message.get("toolName", ""),
+                    "content": text[:10000],
+                }
+
+        if role == "bashExecution":
+            text = f"$ {message.get('command', '')}\n{message.get('output', '')}"
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "tool_result",
+                "role": "tool",
+                "tool": "bash",
+                "content": text[:10000],
+            }
+
+        if role in {"custom", "branchSummary", "compactionSummary"}:
+            text = _join_pi_text(message.get("summary") or _pi_content_text(content), meta_text)
+            if text:
+                return {
+                    "line": line_num,
+                    "timestamp": timestamp,
+                    "type": "analysis",
+                    "role": role,
+                    "content": text[:10000],
+                }
+
+        fallback_text = _join_pi_text(_pi_content_text(content), meta_text, _compact_json_text(message))
+        if fallback_text:
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "analysis",
+                "role": role,
+                "content": fallback_text[:10000],
+            }
+
+    if msg_type in {"compaction", "branch_summary"}:
+        summary = record.get("summary", "")
+        if summary:
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "analysis",
+                "role": "summary",
+                "content": summary[:10000],
+            }
+
+    if msg_type == "custom_message":
+        text = _pi_content_text(record.get("content", ""))
+        if text:
+            return {
+                "line": line_num,
+                "timestamp": timestamp,
+                "type": "analysis",
+                "role": "custom",
+                "content": text[:10000],
+            }
 
     # user 消息
     if msg_type == "user":
@@ -580,7 +758,7 @@ def main():
     group.add_argument("--session", help="Session UUID")
     group.add_argument("--file", help="JSONL 文件路径")
     parser.add_argument("--project", help="项目名（--session 时必须）")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--output", "-o", required=True, help="输出文件路径（必选）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")

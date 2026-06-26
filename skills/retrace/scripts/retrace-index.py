@@ -42,7 +42,7 @@ from retrace_paths import (
 
 configure_utf8_stdio()
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 PREVIEW_LIMIT = 300
 SEARCH_TEXT_LIMIT = 8192
 TRIGRAM_TOOL_RESULT_LIMIT = 4096
@@ -123,6 +123,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             line_no INTEGER NOT NULL,
             byte_offset INTEGER NOT NULL,
             byte_length INTEGER NOT NULL,
+            record_index INTEGER NOT NULL DEFAULT 0,
             uuid TEXT,
             parent_uuid TEXT,
             session_id TEXT,
@@ -133,7 +134,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             content_preview TEXT,
             search_text TEXT,
             content_hash TEXT,
-            UNIQUE(session_file, byte_offset)
+            UNIQUE(session_file, byte_offset, record_index)
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -167,8 +168,80 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _messages_unique_includes_record_index(conn: sqlite3.Connection) -> bool:
+    """Return whether messages has a unique key that includes record_index."""
+    for idx in conn.execute("PRAGMA index_list(messages)").fetchall():
+        # Columns: seq, name, unique, origin, partial.
+        if not idx[2]:
+            continue
+        index_name = idx[1]
+        cols = [row[2] for row in conn.execute(f"PRAGMA index_info({index_name})").fetchall()]
+        if cols == ["session_file", "byte_offset", "record_index"]:
+            return True
+    return False
+
+
+def ensure_messages_record_index_schema(conn: sqlite3.Connection) -> None:
+    """Allow one JSONL line to produce multiple logical retrace messages."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "record_index" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN record_index INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        columns.add("record_index")
+
+    if _messages_unique_includes_record_index(conn):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS messages_new")
+    conn.execute(
+        """
+        CREATE TABLE messages_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_file TEXT NOT NULL,
+            line_no INTEGER NOT NULL,
+            byte_offset INTEGER NOT NULL,
+            byte_length INTEGER NOT NULL,
+            record_index INTEGER NOT NULL DEFAULT 0,
+            uuid TEXT,
+            parent_uuid TEXT,
+            session_id TEXT,
+            timestamp TEXT,
+            msg_type TEXT,
+            role TEXT,
+            tool_name TEXT,
+            content_preview TEXT,
+            search_text TEXT,
+            content_hash TEXT,
+            UNIQUE(session_file, byte_offset, record_index)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO messages_new
+        (id, session_file, line_no, byte_offset, byte_length, record_index,
+         uuid, parent_uuid, session_id, timestamp, msg_type, role,
+         tool_name, content_preview, search_text, content_hash)
+        SELECT id, session_file, line_no, byte_offset, byte_length,
+               COALESCE(record_index, 0),
+               uuid, parent_uuid, session_id, timestamp, msg_type, role,
+               tool_name, content_preview, search_text, content_hash
+        FROM messages
+        """
+    )
+    conn.execute("DROP TABLE messages")
+    conn.execute("ALTER TABLE messages_new RENAME TO messages")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_type ON messages(msg_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_role ON messages(role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tool ON messages(tool_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_session ON messages(session_id)")
+    conn.commit()
+
+
 def ensure_index_schema(conn: sqlite3.Connection) -> None:
     """Apply lightweight schema upgrades for existing index databases."""
+    ensure_messages_record_index_schema(conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
     if "search_text" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN search_text TEXT")
@@ -323,9 +396,342 @@ def extract_codex_project_name(record: dict) -> Optional[str]:
     return encode_path(cwd) if cwd else None
 
 
+def extract_pi_project_name(record: dict) -> Optional[str]:
+    """Return the retrace project bucket from a Pi session header."""
+    if record.get("type") != "session":
+        return None
+    cwd = record.get("cwd")
+    return encode_path(cwd) if cwd else None
+
+
+def _compact_json_text(value, max_len: int = SEARCH_TEXT_LIMIT) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:max_len]
+    except TypeError:
+        return str(value)[:max_len]
+
+
+def _join_limited(parts: list[str], max_len: int = SEARCH_TEXT_LIMIT) -> str:
+    return " ".join(part for part in parts if part).strip()[:max_len]
+
+
+def _pi_content_text(content, max_len: int = SEARCH_TEXT_LIMIT,
+                     include_tool_calls: bool = True,
+                     include_thinking: bool = True) -> str:
+    """Extract readable/searchable text from Pi message content blocks."""
+    if isinstance(content, str):
+        return content[:max_len]
+    if not isinstance(content, list):
+        if content is None:
+            return ""
+        return str(content)[:max_len]
+
+    texts = []
+    remaining = max_len
+    for item in content:
+        if remaining <= 0:
+            break
+        text = ""
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type == "text":
+                text = item.get("text", "")
+            elif item_type == "thinking" and include_thinking:
+                text = item.get("thinking", "")
+            elif item_type == "image":
+                text = f"[image {item.get('mimeType', '') or item.get('mediaType', '')}]"
+            elif item_type == "toolCall" and include_tool_calls:
+                args_text = _compact_json_text(item.get("arguments", {}), remaining)
+                text = f"[Tool: {item.get('name', 'unknown')}] {args_text}"
+            elif "text" in item:
+                text = str(item.get("text", ""))
+            else:
+                text = _compact_json_text(item, remaining)
+        if text:
+            texts.append(text[:remaining])
+            remaining -= len(text)
+    return " ".join(texts)[:max_len]
+
+
+def _pi_message_metadata_text(message: dict, max_len: int = SEARCH_TEXT_LIMIT) -> str:
+    if not isinstance(message, dict):
+        return ""
+    parts = []
+    for key in ("api", "provider", "model", "stopReason", "errorMessage", "toolName", "toolCallId"):
+        value = message.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={value}")
+    if "isError" in message:
+        parts.append(f"isError={message.get('isError')}")
+    for key in ("details", "usage"):
+        value = message.get(key)
+        if value not in (None, "", [], {}):
+            parts.append(f"{key}={_compact_json_text(value, max_len)}")
+    return " ".join(parts)[:max_len]
+
+
+def _pi_tool_calls(content) -> list[dict]:
+    if not isinstance(content, list):
+        return []
+    return [item for item in content if isinstance(item, dict) and item.get("type") == "toolCall"]
+
+
+def normalize_pi_record(data: dict) -> Optional[dict]:
+    """Normalize Pi session JSONL records into index fields."""
+    record_type = data.get("type", "")
+    timestamp = data.get("timestamp", "")
+
+    if record_type == "session":
+        return {
+            "uuid": data.get("id", ""),
+            "parent_uuid": "",
+            "session_id": data.get("id", ""),
+            "timestamp": timestamp,
+            "msg_type": "session_meta",
+            "role": "",
+            "tool_name": "",
+            "content_preview": f"cwd={data.get('cwd', '')} version={data.get('version', '')}",
+            "search_text": f"cwd={data.get('cwd', '')} version={data.get('version', '')}",
+        }
+
+    if record_type == "message":
+        message = data.get("message", {})
+        role = message.get("role", "")
+        content = message.get("content", "")
+        uuid = data.get("id", "")
+        parent_uuid = data.get("parentId", "")
+
+        meta_text = _pi_message_metadata_text(message, SEARCH_TEXT_LIMIT)
+
+        if role == "user":
+            text = _pi_content_text(content, SEARCH_TEXT_LIMIT)
+            return {
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "user",
+                "role": "user",
+                "tool_name": "",
+                "content_preview": _join_limited([_pi_content_text(content, PREVIEW_LIMIT), meta_text], PREVIEW_LIMIT),
+                "search_text": _join_limited([text, meta_text], SEARCH_TEXT_LIMIT),
+            }
+
+        if role == "assistant":
+            tool_calls = _pi_tool_calls(content)
+            tool_names = list(dict.fromkeys(call.get("name", "") for call in tool_calls if call.get("name")))
+            tool_name = ",".join(tool_names)
+            msg_type = "tool_use" if tool_calls else "assistant"
+            text = _pi_content_text(content, SEARCH_TEXT_LIMIT)
+            return {
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": msg_type,
+                "role": "assistant",
+                "tool_name": tool_name,
+                "content_preview": _join_limited([_pi_content_text(content, PREVIEW_LIMIT), meta_text], PREVIEW_LIMIT),
+                "search_text": _join_limited([text, meta_text], SEARCH_TEXT_LIMIT),
+            }
+
+        if role == "toolResult":
+            text = _pi_content_text(content, SEARCH_TEXT_LIMIT)
+            return {
+                "uuid": message.get("toolCallId", uuid),
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "tool_result",
+                "role": "tool",
+                "tool_name": message.get("toolName", ""),
+                "content_preview": _join_limited([_pi_content_text(content, PREVIEW_LIMIT), meta_text], PREVIEW_LIMIT),
+                "search_text": _join_limited([text, meta_text], SEARCH_TEXT_LIMIT),
+            }
+
+        if role == "bashExecution":
+            command = message.get("command", "")
+            output = message.get("output", "")
+            text = f"$ {command}\n{output}"
+            return {
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "tool_result",
+                "role": "tool",
+                "tool_name": "bash",
+                "content_preview": text[:PREVIEW_LIMIT],
+                "search_text": text[:SEARCH_TEXT_LIMIT],
+            }
+
+        if role in {"custom", "branchSummary", "compactionSummary"}:
+            text = _pi_content_text(content, SEARCH_TEXT_LIMIT)
+            if role == "branchSummary":
+                text = message.get("summary", text)
+            if role == "compactionSummary":
+                text = message.get("summary", text)
+            text = _join_limited([text, meta_text], SEARCH_TEXT_LIMIT)
+            return {
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "assistant",
+                "role": role,
+                "tool_name": "",
+                "content_preview": text[:PREVIEW_LIMIT],
+                "search_text": text[:SEARCH_TEXT_LIMIT],
+            }
+
+        fallback_text = _join_limited([
+            _pi_content_text(content, SEARCH_TEXT_LIMIT),
+            meta_text,
+            _compact_json_text(message, SEARCH_TEXT_LIMIT),
+        ], SEARCH_TEXT_LIMIT)
+        if fallback_text:
+            return {
+                "uuid": uuid,
+                "parent_uuid": parent_uuid,
+                "session_id": "",
+                "timestamp": timestamp,
+                "msg_type": "assistant" if role else "session_meta",
+                "role": role,
+                "tool_name": message.get("toolName", ""),
+                "content_preview": fallback_text[:PREVIEW_LIMIT],
+                "search_text": fallback_text[:SEARCH_TEXT_LIMIT],
+            }
+
+    if record_type in {"compaction", "branch_summary"}:
+        summary = data.get("summary", "")
+        return {
+            "uuid": data.get("id", ""),
+            "parent_uuid": data.get("parentId", ""),
+            "session_id": "",
+            "timestamp": timestamp,
+            "msg_type": "assistant",
+            "role": "summary",
+            "tool_name": "",
+            "content_preview": summary[:PREVIEW_LIMIT],
+            "search_text": summary[:SEARCH_TEXT_LIMIT],
+        }
+
+    if record_type in {"model_change", "thinking_level_change", "session_info", "label"}:
+        try:
+            text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        except TypeError:
+            text = str(data)
+        return {
+            "uuid": data.get("id", ""),
+            "parent_uuid": data.get("parentId", ""),
+            "session_id": "",
+            "timestamp": timestamp,
+            "msg_type": "session_meta",
+            "role": "",
+            "tool_name": "",
+            "content_preview": text[:PREVIEW_LIMIT],
+            "search_text": text[:SEARCH_TEXT_LIMIT],
+        }
+
+    if record_type == "custom_message":
+        content = data.get("content", "")
+        text = _pi_content_text(content, SEARCH_TEXT_LIMIT)
+        return {
+            "uuid": data.get("id", ""),
+            "parent_uuid": data.get("parentId", ""),
+            "session_id": "",
+            "timestamp": timestamp,
+            "msg_type": "assistant",
+            "role": "custom",
+            "tool_name": "",
+            "content_preview": text[:PREVIEW_LIMIT],
+            "search_text": text[:SEARCH_TEXT_LIMIT],
+        }
+
+    return None
+
+
+def normalize_pi_records(data: dict) -> list[dict]:
+    """Normalize a Pi JSONL entry into one or more logical retrace records."""
+    if data.get("type") == "message":
+        message = data.get("message", {})
+        if message.get("role") == "assistant":
+            content = message.get("content", "")
+            entry_id = data.get("id", "")
+            parent_id = data.get("parentId", "")
+            timestamp = data.get("timestamp", "")
+            records: list[dict] = []
+
+            meta_text = _pi_message_metadata_text(message, SEARCH_TEXT_LIMIT)
+            assistant_preview = _join_limited([
+                _pi_content_text(content, PREVIEW_LIMIT, include_tool_calls=False),
+                meta_text,
+            ], PREVIEW_LIMIT)
+            assistant_text = _join_limited([
+                _pi_content_text(content, SEARCH_TEXT_LIMIT, include_tool_calls=False),
+                meta_text,
+            ], SEARCH_TEXT_LIMIT)
+            if assistant_text.strip():
+                records.append({
+                    "uuid": entry_id,
+                    "parent_uuid": parent_id,
+                    "session_id": "",
+                    "timestamp": timestamp,
+                    "msg_type": "assistant",
+                    "role": "assistant",
+                    "tool_name": "",
+                    "content_preview": assistant_preview,
+                    "search_text": assistant_text,
+                })
+
+            for call in _pi_tool_calls(content):
+                args = call.get("arguments", {})
+                args_text = _compact_json_text(args, SEARCH_TEXT_LIMIT)
+                tool_name = call.get("name", "")
+                tool_text = f"[Tool: {tool_name or 'unknown'}] {args_text}"
+                records.append({
+                    "uuid": entry_id,
+                    "parent_uuid": parent_id,
+                    "session_id": "",
+                    "timestamp": timestamp,
+                    "msg_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": tool_name,
+                    "content_preview": tool_text[:PREVIEW_LIMIT],
+                    "search_text": tool_text[:SEARCH_TEXT_LIMIT],
+                })
+
+            if records:
+                return records
+
+    normalized = normalize_pi_record(data)
+    return [normalized] if normalized else []
+
+
+def normalize_records(data: dict) -> list[dict]:
+    """Normalize one JSONL entry into one or more retrace index records."""
+    record_type = data.get("type", "")
+    if record_type in {
+        "session", "message", "compaction", "branch_summary", "custom_message",
+        "model_change", "thinking_level_change", "session_info", "label",
+    }:
+        return normalize_pi_records(data)
+
+    normalized = normalize_record(data)
+    return [normalized] if normalized else []
+
+
 def normalize_record(data: dict) -> Optional[dict]:
     """Normalize Claude-style and Codex-style JSONL records into index fields."""
     record_type = data.get("type", "")
+
+    if record_type in {
+        "session", "message", "compaction", "branch_summary", "custom_message",
+        "model_change", "thinking_level_change", "session_info", "label",
+    }:
+        return normalize_pi_record(data)
 
     if record_type in {"user", "assistant", "tool_result"}:
         message = data.get("message", {})
@@ -481,9 +887,9 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 if line_no == 1:
                     try:
                         record = json.loads(line.decode("utf-8"))
-                        normalized = normalize_record(record)
-                        if normalized and record.get("type") == "session_meta":
-                            current_session_id = normalized.get("session_id", "")
+                        normalized_rows = normalize_records(record)
+                        if normalized_rows and record.get("type") in {"session_meta", "session"}:
+                            current_session_id = normalized_rows[0].get("session_id", "")
                     except Exception:
                         pass
 
@@ -501,52 +907,54 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 byte_offset += line_length
                 continue
 
-            normalized = normalize_record(data)
-            if not normalized:
+            normalized_rows = normalize_records(data)
+            if not normalized_rows:
                 byte_offset += line_length
                 continue
 
-            if data.get("type") == "session_meta":
-                current_session_id = normalized.get("session_id", "")
-            elif current_session_id and not normalized.get("session_id"):
-                normalized["session_id"] = current_session_id
+            if data.get("type") in {"session_meta", "session"}:
+                current_session_id = normalized_rows[0].get("session_id", "")
 
-            uuid = normalized.get("uuid", "")
-            parent_uuid = normalized.get("parent_uuid", "")
-            session_id = normalized.get("session_id", "")
-            timestamp = normalized.get("timestamp", "")
-            msg_type = normalized.get("msg_type", "")
-            role = normalized.get("role", "")
+            for record_index, normalized in enumerate(normalized_rows):
+                if current_session_id and not normalized.get("session_id"):
+                    normalized["session_id"] = current_session_id
 
-            if session_id:
-                session_ids.add(session_id)
+                uuid = normalized.get("uuid", "")
+                parent_uuid = normalized.get("parent_uuid", "")
+                session_id = normalized.get("session_id", "")
+                timestamp = normalized.get("timestamp", "")
+                msg_type = normalized.get("msg_type", "")
+                role = normalized.get("role", "")
 
-            tool_name = normalized.get("tool_name")
-            content_preview = normalized.get("content_preview", "")
-            search_text = normalized.get("search_text", content_preview)
-            content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
+                if session_id:
+                    session_ids.add(session_id)
 
-            try:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO messages
-                    (session_file, line_no, byte_offset, byte_length,
-                     uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                     tool_name, content_preview, search_text, content_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (session_file, line_no, byte_offset, line_length,
-                      uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                      tool_name, content_preview, search_text, content_hash))
+                tool_name = normalized.get("tool_name")
+                content_preview = normalized.get("content_preview", "")
+                search_text = normalized.get("search_text", content_preview)
+                content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
 
-                if cursor.rowcount > 0:
-                    msg_id = cursor.lastrowid
-                    indexed_count += 1
+                try:
                     cursor.execute('''
-                        INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (msg_id, search_text, msg_type, role, tool_name or ""))
-                    insert_trigram_if_selective(conn, msg_id, search_text, msg_type, role, tool_name or "")
-            except sqlite3.IntegrityError:
-                pass
+                        INSERT OR IGNORE INTO messages
+                        (session_file, line_no, byte_offset, byte_length, record_index,
+                         uuid, parent_uuid, session_id, timestamp, msg_type, role,
+                         tool_name, content_preview, search_text, content_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (session_file, line_no, byte_offset, line_length, record_index,
+                          uuid, parent_uuid, session_id, timestamp, msg_type, role,
+                          tool_name, content_preview, search_text, content_hash))
+
+                    if cursor.rowcount > 0:
+                        msg_id = cursor.lastrowid
+                        indexed_count += 1
+                        cursor.execute('''
+                            INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (msg_id, search_text, msg_type, role, tool_name or ""))
+                        insert_trigram_if_selective(conn, msg_id, search_text, msg_type, role, tool_name or "")
+                except sqlite3.IntegrityError:
+                    pass
 
             byte_offset += line_length
 
@@ -843,6 +1251,24 @@ def detect_session_project(session_file: Path, platform: RetracePlatform) -> Opt
         except ValueError:
             return session_file.parent.name
 
+    if platform.name == "pi":
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    project_name = extract_pi_project_name(record)
+                    if project_name:
+                        return project_name
+                    break
+        except OSError:
+            return None
+        return None
+
     try:
         with open(session_file, "r", encoding="utf-8") as f:
             for line in f:
@@ -1010,7 +1436,7 @@ def main():
     parser = argparse.ArgumentParser(description="Claude Code 会话日志索引器 (按项目独立索引)")
     parser.add_argument("--auto", action="store_true", help="自动索引所有项目")
     parser.add_argument("--project", help="过滤项目名")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--no-incremental", action="store_true", help="重建索引")
     parser.add_argument("--no-summary", action="store_true", help="不生成会话摘要")

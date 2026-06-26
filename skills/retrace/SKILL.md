@@ -1,12 +1,12 @@
 ---
 name: retrace
 description: This skill should be used when the user asks to "find past conversations", "recall what was done", "search history", "look up previous work", "how did we handle X", "what was that implementation", "find similar code", "search session", "analyze conversation history", "recover file", "restore previous version", or mentions terms like "earlier", "before", "previously", "last time", "history", "past work".
-version: 0.3.0
+version: 0.4.0
 ---
 
-# Retrace - Codex and Claude Code Session History Search
+# Retrace - Codex, Claude Code, and Pi Session History Search
 
-Search and analyze Codex or Claude Code conversation history using SQLite FTS full-text search with BM25 ranking.
+Search and analyze Codex, Claude Code, or pi conversation history using SQLite FTS full-text search with BM25 ranking.
 
 ## Architecture
 
@@ -14,9 +14,10 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 - Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
 - Codex indexes: `~/.codex/projects/<encoded-cwd>/retrace-index.db`.
 - Claude Code sessions and indexes: `~/.claude/projects/<encoded-cwd>/*.jsonl`, `~/.claude/projects/<encoded-cwd>/*/subagents/*.jsonl`, and `retrace-index.db`, overridable with `CLAUDE_HOME`.
-- Platform selection is mandatory: pass `--platform codex` or `--platform claude`.
+- Pi sessions: `~/.pi/agent/sessions/**/*.jsonl`; Pi indexes: `~/.pi/agent/projects/<encoded-cwd>/retrace-index.db`, overridable with `PI_AGENT_HOME`.
+- Platform selection is mandatory: pass `--platform codex`, `--platform claude`, or `--platform pi`.
 - Windows-first shell: prefer PowerShell 7 (`pwsh`) on this setup, but Unix `sh` examples are packaged under `examples/`.
-- Platform modules: `platforms/codex.py` and `platforms/claude.py` own platform-specific paths; `platforms/common.py` holds the shared data model.
+- Platform modules: `platforms/codex.py`, `platforms/claude.py`, and `platforms/pi.py` own platform-specific paths; `platforms/common.py` holds the shared data model.
 - Compatibility facade: `retrace_paths.py` exposes the small public API used by scripts.
 
 ## Core Workflow
@@ -52,11 +53,13 @@ PYTHON_CMD="python3"
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
 ```
 
 ```sh
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for normal local use. Summary and analysis commands call `codex exec`, which is slower and spends model calls.
@@ -67,6 +70,7 @@ They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNS
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --list-sessions --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude --list-sessions --project poly-retrace --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi --list-sessions --project poly-retrace
 ```
 
 ## Search Sessions
@@ -74,6 +78,7 @@ They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNS
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "query" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi --hybrid "多 pi 编排 worker_done" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "error" --level stats --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
@@ -88,6 +93,7 @@ Prefer `--hybrid` immediately when queries look like `录音确认超时 req_id`
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "query" --platform claude --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "worker_done" --platform pi --prompt "summarize" --project poly-retrace
 ```
 
 ## Session Chronicle
@@ -95,6 +101,7 @@ Prefer `--hybrid` immediately when queries look like `录音确认超时 req_id`
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform pi --session <uuid> --project poly-retrace --output .\pi-chronicle.toon
 ```
 
 ## File Recovery

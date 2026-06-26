@@ -1,12 +1,12 @@
 # poly-retrace
 
-Search and analyze Codex and Claude Code conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
+Search and analyze Codex, Claude Code, and Pi conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
 
 Chinese version: [README_CN.md](./README_CN.md).
 
 ## What it does
 
-- Indexes every Codex and Claude Code session JSONL into a per-project SQLite database.
+- Indexes every Codex, Claude Code, and Pi session JSONL into a per-project SQLite database.
 - Full-text search with BM25 ranking, plus a hybrid trigram mode for Chinese, paths, hyphenated names, and pasted log fragments.
 - Layered search output (`stats` -> `list` -> `detail` -> `full`) to keep token budgets under control.
 - Single-session chronicle extraction to TOON / JSON for handoff or memory.
@@ -17,9 +17,10 @@ Chinese version: [README_CN.md](./README_CN.md).
 
 - Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
 - Claude Code sessions: `%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`; default home is `~/.claude`.
+- Pi sessions: `%PI_AGENT_HOME%\sessions\**\*.jsonl` / `$PI_AGENT_HOME/sessions/**/*.jsonl`; default home is `~/.pi/agent`.
 - Indexes live under each platform home at `projects/<encoded-cwd>/retrace-index.db`.
 
-Pass `--platform codex` or `--platform claude` explicitly.
+Pass `--platform codex`, `--platform claude`, or `--platform pi` explicitly.
 
 ### Path encoding
 
@@ -45,6 +46,7 @@ poly-retrace/
 |   |   |-- common.py             # shared data model
 |   |   |-- codex.py              # Codex paths and parsing
 |   |   |-- claude.py             # Claude Code paths and parsing
+|   |   |-- pi.py                 # Pi paths and parsing
 |   |-- retrace-index.py          # build / refresh FTS index
 |   |-- retrace-search.py         # search (FTS or hybrid)
 |   |-- retrace-locate.py         # locate session files
@@ -86,6 +88,9 @@ Always ensure the index is current before searching.
 # Claude Code
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 
+# Pi
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
+
 # Stats
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -93,6 +98,7 @@ Always ensure the index is current before searching.
 ```sh
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -109,6 +115,7 @@ Use `--no-summary` for routine local indexing. Drop it only when you want Codex-
 
 # Hybrid query (use proactively for mixed Chinese / code / log inputs)
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi --hybrid "多 pi 编排 worker_done" --project poly-retrace
 
 # Filtered
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
@@ -161,6 +168,7 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --platform claude --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "worker_done" --platform pi --prompt "summarize pi orchestration work" --project poly-retrace
 ```
 
 Small result sets go through a single `codex exec` call. Large sets are chunked in parallel; expect roughly 5-7 seconds per small call and 15-22 seconds per chunk, with up to 20 concurrent chunks.
@@ -186,13 +194,13 @@ Reconstruct file versions from a session when edits were not committed to git. T
 
 ## Skill entry point
 
-`skills/retrace/SKILL.md` is the Claude Code skill that triggers on phrases like "find past conversations", "recall what was done", "search history", "recover file", and similar. The skill drives the same scripts described above.
+`skills/retrace/SKILL.md` is the skill entry point for supported agent clients. It triggers on phrases like "find past conversations", "recall what was done", "search history", "recover file", and similar. The skill drives the same scripts described above.
 
 ## Troubleshooting
 
 | Issue                              | Fix                                                                                          |
 |------------------------------------|----------------------------------------------------------------------------------------------|
-| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude> --project <name> --no-summary`.       |
+| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|pi> --project <name> --no-summary`.    |
 | No results                         | Verify `--project`, broaden the query, then retry with `--hybrid`.                           |
 | Query with `-` raises FTS errors   | Update to the current script; queries are auto-quoted when they contain non-word characters. |
 | Garbled console output             | Run under PowerShell 7. Scripts also force UTF-8 stdio.                                      |

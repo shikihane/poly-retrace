@@ -17,7 +17,7 @@ from retrace_paths import configure_utf8_stdio, get_platforms
 
 configure_utf8_stdio()
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def get_projects_dir(platform: str = "codex") -> Path:
@@ -102,7 +102,7 @@ def main():
     parser.add_argument("--project", help="项目名称（部分匹配，必填，除非使用 --all）")
     parser.add_argument("--all", action="store_true", help="清理所有项目的索引")
     parser.add_argument("--dry-run", action="store_true", help="预览但不删除")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 

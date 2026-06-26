@@ -23,11 +23,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
-from retrace_paths import configure_utf8_stdio, encode_path, find_session_files, get_platform
+from retrace_paths import configure_utf8_stdio, encode_path, find_session_files, get_platform, read_first_json_record
 
 configure_utf8_stdio()
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def normalize_path(path: str) -> str:
@@ -116,6 +116,110 @@ def extract_file_content(tool_use: dict, tool_result: dict) -> Optional[str]:
             return content
 
     return None
+
+
+def pi_content_text(content) -> str:
+    """Extract text from Pi toolResult content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text_parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                text_parts.append(item)
+        return "".join(text_parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def pi_tool_path(tool_name: str, args: dict) -> str:
+    if tool_name in {"write", "read", "edit"}:
+        return args.get("path") or args.get("file_path") or ""
+    if tool_name == "bash":
+        cmd = args.get("command", "")
+        match = re.match(r'^cat\s+["\']?([^"\']+)["\']?\s*$', cmd.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def extract_pi_file_content(tool_name: str, args: dict, tool_result_message: dict) -> Optional[str]:
+    if tool_result_message.get("isError"):
+        return None
+
+    if tool_name == "write":
+        content = args.get("content")
+        return content if isinstance(content, str) else None
+
+    if tool_name == "read":
+        if "offset" in args or "limit" in args:
+            return None
+        return pi_content_text(tool_result_message.get("content", ""))
+
+    if tool_name == "bash":
+        if is_safe_bash_cat(args.get("command", "")):
+            return pi_content_text(tool_result_message.get("content", ""))
+
+    return None
+
+
+def scan_pi_session(session_file: Path, target_file: str) -> List[Dict]:
+    """Scan a Pi session file and collect reliable file versions."""
+    versions = []
+    pending: Dict[str, Dict] = {}
+
+    with open(session_file, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if rec.get("type") != "message":
+                continue
+
+            message = rec.get("message", {})
+            role = message.get("role", "")
+
+            if role == "assistant":
+                content = message.get("content", [])
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "toolCall":
+                        call_id = item.get("id", "")
+                        if not call_id:
+                            continue
+                        pending[call_id] = {
+                            "timestamp": rec.get("timestamp", ""),
+                            "tool": item.get("name", ""),
+                            "args": item.get("arguments", {}) or {},
+                        }
+
+            elif role == "toolResult":
+                call_id = message.get("toolCallId", "")
+                tool_use = pending.get(call_id)
+                if not tool_use:
+                    continue
+
+                tool_name = tool_use.get("tool", "")
+                args = tool_use.get("args", {})
+                file_path = pi_tool_path(tool_name, args)
+                if not file_path or not match_path(file_path, target_file):
+                    continue
+
+                file_content = extract_pi_file_content(tool_name, args, message)
+                if file_content is not None:
+                    versions.append({
+                        "timestamp": tool_use.get("timestamp") or rec.get("timestamp", ""),
+                        "tool": tool_name,
+                        "content": file_content,
+                    })
+
+    return versions
 
 
 def scan_session(session_file: Path, target_file: str) -> List[Dict]:
@@ -249,18 +353,45 @@ def save_versions(versions: List[Dict], target_file: str, output_dir: Path):
     return len(versions)
 
 
-def find_session_file(session_uuid: str, project_dir: Path, platform: str = "codex") -> Optional[Path]:
+def session_matches_project(session_file: Path, project_hint: str, platform: str) -> bool:
+    if not project_hint:
+        return True
+    hint = project_hint.lower()
+    first = read_first_json_record(session_file)
+    cwd = first.get("cwd", "") if isinstance(first, dict) else ""
+    if platform == "codex" and not cwd:
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    if rec.get("type") == "session_meta":
+                        cwd = rec.get("payload", {}).get("cwd", "")
+                        break
+        except Exception:
+            pass
+    encoded = encode_path(cwd) if cwd else ""
+    haystack = " ".join(part for part in (str(session_file), cwd, encoded) if part).lower()
+    return hint in haystack
+
+
+def find_session_file(session_uuid: str, project_dir: Optional[Path], platform: str = "codex",
+                      project_hint: str = None) -> Optional[Path]:
     """查找会话文件"""
-    matches = [
-        f for f in find_session_files(session_uuid, platform)
-        if project_dir in f.parents or f.parent == project_dir
-    ]
+    matches = []
+    for f in find_session_files(session_uuid, platform):
+        if project_dir and project_dir.exists() and (project_dir in f.parents or f.parent == project_dir):
+            matches.append(f)
+        elif session_matches_project(f, project_hint or "", platform):
+            matches.append(f)
     if matches:
         return matches[0]
     # 直接匹配 UUID
-    for f in project_dir.rglob('*.jsonl'):
-        if session_uuid in f.name:
-            return f
+    if project_dir and project_dir.exists():
+        for f in project_dir.rglob('*.jsonl'):
+            if session_uuid in f.name:
+                return f
     return None
 
 
@@ -272,7 +403,7 @@ def main():
     parser.add_argument("--session", required=True, help="会话 UUID")
     parser.add_argument("--file", required=True, help="目标文件路径")
     parser.add_argument("--project", help="项目目录名 (默认: 从当前目录推断)")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--output", required=True, help="输出目录")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -299,13 +430,14 @@ def main():
             encoded = encode_path(str(cwd))
             project_dir = projects_dir / encoded
 
-    if not project_dir.exists():
+    project_hint = args.project or (project_dir.name if project_dir else "")
+    if project_dir and not project_dir.exists() and args.platform == "claude":
         print(f"❌ 项目目录不存在: {project_dir}", file=sys.stderr)
         print(f"   可用项目: {list(project_dir.parent.glob('*'))[:10]}...", file=sys.stderr)
         sys.exit(1)
 
     # 查找会话文件
-    session_file = find_session_file(args.session, project_dir, args.platform)
+    session_file = find_session_file(args.session, project_dir, args.platform, project_hint)
     if not session_file:
         print(f"❌ 会话文件不存在: {args.session}", file=sys.stderr)
         sys.exit(1)
@@ -314,7 +446,10 @@ def main():
     print(f"📄 目标文件: {args.file}")
 
     # 扫描收集版本
-    versions = scan_session(session_file, args.file)
+    if args.platform == "pi":
+        versions = scan_pi_session(session_file, args.file)
+    else:
+        versions = scan_session(session_file, args.file)
 
     if not versions:
         print(f"❌ 找不到该文件的可靠版本 (Write/Read/Bash cat)", file=sys.stderr)

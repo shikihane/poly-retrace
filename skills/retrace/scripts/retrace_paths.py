@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 
 from platforms import claude as claude_platform
 from platforms import codex as codex_platform
+from platforms import pi as pi_platform
 from platforms.common import RetracePlatform
 
 
@@ -31,6 +32,8 @@ def get_platform(platform: str = "codex") -> RetracePlatform:
         return codex_platform.create_platform()
     if platform == "claude":
         return claude_platform.create_platform()
+    if platform == "pi":
+        return pi_platform.create_platform()
     raise ValueError(f"unknown platform: {platform}")
 
 
@@ -77,7 +80,7 @@ def decode_path(encoded: str, platform: str = "codex") -> str:
                 continue
             record = json.loads(first)
             payload = record.get("payload", {})
-            cwd = payload.get("cwd", "")
+            cwd = record.get("cwd", "") or payload.get("cwd", "")
             if cwd and encode_path(cwd) == encoded:
                 return cwd
         except Exception:
@@ -115,6 +118,11 @@ def extract_session_id(record: dict) -> str:
     """Extract a session identifier from a JSONL record."""
     if not isinstance(record, dict):
         return ""
+    if record.get("type") == "session":
+        value = record.get("id")
+        if value:
+            return str(value)
+
     for key in ("sessionId", "session_id", "sessionID"):
         value = record.get(key)
         if value:

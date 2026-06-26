@@ -1,10 +1,10 @@
 # AGENTS.md - Poly-Retrace Skill
 
-Codex and Claude Code session history search and analysis skill.
+Codex, Claude Code, and Pi session history search and analysis skill.
 
 ## Overview
 
-Poly-retrace searches and analyzes Codex or Claude Code conversation history using SQLite FTS with BM25 ranking.
+Poly-retrace searches and analyzes Codex, Claude Code, or Pi conversation history using SQLite FTS with BM25 ranking.
 
 ## Architecture
 
@@ -18,7 +18,8 @@ poly-retrace/
 │           ├── platforms/
 │           │   ├── common.py
 │           │   ├── codex.py
-│           │   └── claude.py
+│           │   ├── claude.py
+│           │   └── pi.py
 │           ├── retrace_common.py
 │           ├── retrace-locate.py
 │           ├── retrace-index.py
@@ -50,7 +51,7 @@ All runtime scripts must live under `skills/retrace/scripts`. After loading the 
 Set-Location .\skills\retrace
 $env:RETRACE_SCRIPTS = Join-Path (Get-Location) "scripts"
 $PYTHON_CMD = "python"
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" "query"
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi "query"
 ```
 
 ### Skill Installation
@@ -62,6 +63,7 @@ Do not assume one skill directory covers all clients. When installing or refresh
 | Claude Code | `$HOME\.claude\skills\retrace` |
 | Codex Desktop | `$HOME\.codex\skills\retrace` |
 | Agent skill autocomplete | `$HOME\.agents\skills\retrace` |
+| Pi | `$HOME\.pi\agent\skills\retrace` |
 
 For this Windows setup, also check both user-home aliases when they exist:
 
@@ -82,7 +84,7 @@ python "$HOME\.claude\skills\retrace\scripts\retrace-search.py" --version
 Get-Content "$HOME\.claude\skills\retrace\SKILL.md" -TotalCount 3
 ```
 
-If `/retrace` does not appear in autocomplete, first check whether the UI is reading `.claude\skills`, `.codex\skills`, or `.agents\skills`; then restart the client or open a new session to clear autocomplete caches.
+If `/retrace` does not appear in autocomplete, first check whether the UI is reading `.claude\skills`, `.codex\skills`, `.agents\skills`, or `.pi\agent\skills`; then restart the client or open a new session to clear autocomplete caches.
 
 ### Index Before Search
 
@@ -91,6 +93,7 @@ Always choose a platform explicitly when you do not want the Codex default:
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for routine local indexing. AI summary and analysis paths call `codex exec`.
@@ -105,8 +108,9 @@ AI summary and analysis commands run without bypassing sandbox/approval checks b
 |----------|-----------------|----------------|
 | Codex | `$HOME\.codex\sessions\**\*.jsonl`, `$HOME\.codex\archived_sessions\*.jsonl` | `$HOME\.codex\projects\<encoded-cwd>\retrace-index.db` |
 | Claude Code | `$HOME\.claude\projects\<encoded-cwd>\*.jsonl` | `$HOME\.claude\projects\<encoded-cwd>\retrace-index.db` |
+| Pi | `$HOME\.pi\agent\sessions\**\*.jsonl` | `$HOME\.pi\agent\projects\<encoded-cwd>\retrace-index.db` |
 
-Each platform keeps its own project index root. Do not mix Codex and Claude indexes in the same directory.
+Each platform keeps its own project index root. Do not mix Codex, Claude, and Pi indexes in the same directory.
 
 ### Path Encoding
 
@@ -123,7 +127,8 @@ Because hyphens can also appear in real path components, decoding is best-effort
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform pi
 ```
 
 ### Search
@@ -131,6 +136,7 @@ Because hyphens can also appear in real path components, decoding is best-effort
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --list-sessions --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "query" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi --hybrid "多 pi 编排 worker_done" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
@@ -149,15 +155,16 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 ### Analyze
 
 ```powershell
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --prompt "summarize errors" --project poly-retrace
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --prompt "classify" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "summarize errors" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --platform pi --prompt "classify" --json
 ```
 
 ### Chronicle
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform pi --session <uuid> --project poly-retrace --output .\pi-chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
 ## Filter Options
@@ -176,7 +183,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 
 | Issue | Solution |
 |-------|----------|
-| "索引数据库不存在" | Run `retrace-index.py --auto --platform codex --project <name> --no-summary` or the matching `claude` command |
+| "索引数据库不存在" | Run `retrace-index.py --auto --platform <codex|claude|pi> --project <name> --no-summary` |
 | No results | Check project filter, then retry complex Chinese/code/log queries with `--hybrid` |
 | Query with `-` errors | Search now quotes plain text FTS queries; rebuild if using old scripts |
 | Garbled console output | Run through PowerShell 7; scripts also force UTF-8 stdio |
