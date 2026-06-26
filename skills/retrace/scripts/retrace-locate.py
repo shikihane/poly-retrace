@@ -30,6 +30,7 @@ from retrace_paths import (
     configure_utf8_stdio,
     decode_path,
     encode_path,
+    extract_session_id,
     find_session_files,
     get_platform,
     get_platforms,
@@ -39,7 +40,7 @@ from retrace_paths import (
 
 configure_utf8_stdio()
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def get_claude_dir() -> Path:
@@ -104,7 +105,7 @@ def get_codex_session_meta(session_file: Path) -> Dict:
 
 def get_session_cwd(session_file: Path, platform: str = "codex") -> str:
     """Return the cwd recorded by a session file when available."""
-    if platform == "claude":
+    if platform in {"claude", "pi"}:
         first_record = read_first_json_record(session_file)
         return first_record.get("cwd", "")
     return get_codex_session_meta(session_file).get("cwd", "")
@@ -139,8 +140,7 @@ def find_latest_session(project_dir: Path) -> Optional[Path]:
 def locate_session(cwd: str = None, session_id: str = None, platform: str = "codex") -> dict:
     """定位会话文件"""
     projects_dir = get_projects_dir(platform)
-    if not projects_dir.exists():
-        return {"error": f"Codex projects 目录不存在: {projects_dir}"}
+    projects_dir.mkdir(parents=True, exist_ok=True)
 
     # 方法 1: 指定了 session_id
     if session_id:
@@ -302,24 +302,33 @@ def list_projects(platform: str = "codex") -> List[Dict]:
 def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
     """列出项目的所有会话（含摘要）"""
     projects_dir = get_projects_dir(platform)
+    projects_dir.mkdir(parents=True, exist_ok=True)
 
-    # 支持模糊匹配项目名
-    project_dir = None
-    for pd in projects_dir.iterdir():
-        if pd.is_dir() and project_name.lower() in pd.name.lower():
-            project_dir = pd
-            break
-
-    if not project_dir or not project_dir.exists():
-        return []
-
-    # 获取摘要
-    summaries = get_session_summaries(project_dir)
+    project_name_lower = project_name.lower()
+    project_dirs = [pd for pd in projects_dir.iterdir()
+                    if pd.is_dir() and project_name_lower in pd.name.lower()]
+    summaries = {}
+    for project_dir in project_dirs:
+        summaries.update(get_session_summaries(project_dir))
 
     sessions = []
-    for f in find_project_session_files(project_dir):
+    for f in iter_session_files(platform):
+        cwd = get_session_cwd(f, platform)
+        if platform == "claude":
+            try:
+                encoded_name = f.relative_to(projects_dir).parts[0]
+            except ValueError:
+                encoded_name = encode_path(cwd) if cwd else f.parent.name
+        else:
+            encoded_name = encode_path(cwd) if cwd else ""
+
+        haystack = " ".join(part for part in (encoded_name, cwd, str(f)) if part).lower()
+        if project_name_lower not in haystack:
+            continue
+
         stat = f.stat()
-        session_id = f.stem
+        first = read_first_json_record(f)
+        session_id = extract_session_id(first) or f.stem
         info = summaries.get(session_id, {})
         sessions.append({
             "session_id": session_id,
@@ -329,6 +338,8 @@ def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
             "message_count": info.get("message_count"),
             "summary": info.get("summary")
         })
+
+    sessions.sort(key=lambda item: item.get("modified", ""), reverse=True)
     return sessions
 
 
@@ -338,7 +349,7 @@ def main():
     parser.add_argument("--session-id", help="指定会话 ID")
     parser.add_argument("--list", action="store_true", help="列出项目或会话")
     parser.add_argument("--project", help="指定项目名")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")

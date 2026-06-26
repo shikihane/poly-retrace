@@ -59,7 +59,11 @@ foreach ($name in @(
     "retrace-recover.py",
     "retrace_paths.py",
     "retrace_common.py",
-    "validate-skill.ps1"
+    "validate-skill.ps1",
+    "platforms\common.py",
+    "platforms\codex.py",
+    "platforms\claude.py",
+    "platforms\pi.py"
 )) {
     Test-RequiredFile (Join-Path $PSScriptRoot $name)
 }

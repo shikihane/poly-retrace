@@ -26,7 +26,7 @@ from retrace_paths import configure_utf8_stdio
 
 configure_utf8_stdio()
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 SYSTEM_PROMPT = "Data analyzer. Output JSON with findings array and summary string. No explanation."
 
@@ -112,7 +112,7 @@ def main():
     parser.add_argument("query", help="搜索关键词")
     parser.add_argument("--prompt", "-p", default="analyze and summarize", help="分析任务")
     parser.add_argument("--project", help="项目名过滤")
-    parser.add_argument("--platform", choices=["codex", "claude"], default="codex",
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], default="codex",
                         help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON输出")
     parser.add_argument("--version", "-v", action="version", version=f"retrace-analyze {VERSION}")

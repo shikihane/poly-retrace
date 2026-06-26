@@ -37,8 +37,22 @@ class CodexWindowsSupportTests(unittest.TestCase):
     def test_platforms_have_separate_homes_and_projects(self):
         from retrace_paths import get_platform
 
-        codex = get_platform("codex")
-        claude = get_platform("claude")
+        old_codex_home = os.environ.get("CODEX_HOME")
+        old_claude_home = os.environ.get("CLAUDE_HOME")
+        os.environ.pop("CODEX_HOME", None)
+        os.environ.pop("CLAUDE_HOME", None)
+        try:
+            codex = get_platform("codex")
+            claude = get_platform("claude")
+        finally:
+            if old_codex_home is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old_codex_home
+            if old_claude_home is None:
+                os.environ.pop("CLAUDE_HOME", None)
+            else:
+                os.environ["CLAUDE_HOME"] = old_claude_home
 
         self.assertEqual(codex.name, "codex")
         self.assertEqual(claude.name, "claude")

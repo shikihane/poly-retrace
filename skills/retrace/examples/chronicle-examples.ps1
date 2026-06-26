@@ -1,40 +1,33 @@
 $ErrorActionPreference = "Stop"
 $PYTHON_CMD = "python"
 $env:RETRACE_SCRIPTS = Join-Path $PSScriptRoot "..\scripts"
+$PLATFORM = if ($env:RETRACE_PLATFORM) { $env:RETRACE_PLATFORM } else { "codex" }
+$PROJECT = if ($env:RETRACE_PROJECT) { $env:RETRACE_PROJECT } else { "poly-retrace" }
+$SESSION = if ($env:RETRACE_SESSION) { $env:RETRACE_SESSION } else { "<session-uuid>" }
 
-Write-Host "=== Example 1: Basic Chronicle ==="
+Write-Host "=== Example 1: Chronicle by Session ID ==="
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --session 550e8400-e29b-41d4-a716-446655440000 `
-    --project polydev
+    --platform $PLATFORM `
+    --session $SESSION `
+    --project $PROJECT `
+    --output .\chronicle.toon
 
-Write-Host "=== Example 2: Chronicle by Direct File Path ==="
+Write-Host "=== Example 2: JSON Output ==="
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --file "$HOME\.claude\projects\polydev\550e8400-e29b-41d4-a716-446655440000.jsonl"
-
-Write-Host "=== Example 3: JSON Output ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --file "$HOME\.claude\projects\polydev\550e8400-e29b-41d4-a716-446655440000.jsonl" `
+    --platform $PLATFORM `
+    --session $SESSION `
+    --project $PROJECT `
+    --output .\chronicle.json `
     --json
 
+Write-Host "=== Example 3: Direct File Path (replace path) ==="
+Write-Host "& `$PYTHON_CMD `"`$env:RETRACE_SCRIPTS\retrace-chronicle.py`" --platform $PLATFORM --file `"<path-to-session.jsonl>`" --output .\chronicle.toon"
+
 Write-Host "=== Example 4: Filter Code Events ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --session 550e8400-e29b-41d4-a716-446655440000 `
-    --project polydev | Select-String ",code,"
+Get-Content .\chronicle.toon | Select-String ",code,"
 
 Write-Host "=== Example 5: Extract Commands ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --session 550e8400-e29b-41d4-a716-446655440000 `
-    --project polydev | Select-String ",cmd,"
+Get-Content .\chronicle.toon | Select-String ",cmd,"
 
 Write-Host "=== Example 6: Errors and Fixes ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --session 550e8400-e29b-41d4-a716-446655440000 `
-    --project polydev | Select-String ",(error|fix|mistake),"
-
-Write-Host "=== Example 7: Project Chronicle ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --project polydev
-
-Write-Host "=== Example 8: Save to File ==="
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
-    --session 550e8400-e29b-41d4-a716-446655440000 `
-    --project polydev | Set-Content .\session_chronicle.txt
+Get-Content .\chronicle.toon | Select-String ",(error|fix|mistake),"

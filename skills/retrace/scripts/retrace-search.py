@@ -36,7 +36,7 @@ from retrace_paths import configure_utf8_stdio, get_platform, get_platforms
 
 configure_utf8_stdio()
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def prepare_fts_query(query: str) -> str:
@@ -220,7 +220,7 @@ def search_stats(conn: sqlite3.Connection, query: str = None,
         conditions.append("role = ?")
         params.append(role)
     if tool:
-        conditions.append("tool_name = ?")
+        conditions.append("instr(',' || COALESCE(tool_name, '') || ',', ',' || ? || ',') > 0")
         params.append(tool)
     # Note: project filtering now happens at database selection level (per-project DBs)
     if session_id:
@@ -294,7 +294,7 @@ def search_list(conn: sqlite3.Connection, query: str = None,
         conditions.append("m.role = ?")
         params.append(role)
     if tool:
-        conditions.append("m.tool_name = ?")
+        conditions.append("instr(',' || COALESCE(m.tool_name, '') || ',', ',' || ? || ',') > 0")
         params.append(tool)
     # Note: project filtering now happens at database selection level (per-project DBs)
     if session_id:
@@ -368,7 +368,7 @@ def fts_search_rows(conn: sqlite3.Connection, query: str, msg_type: str = None,
         conditions.append("m.role = ?")
         params.append(role)
     if tool:
-        conditions.append("m.tool_name = ?")
+        conditions.append("instr(',' || COALESCE(m.tool_name, '') || ',', ',' || ? || ',') > 0")
         params.append(tool)
     if session_id:
         conditions.append("m.session_id = ?")
@@ -419,7 +419,7 @@ def trigram_search_rows(conn: sqlite3.Connection, query: str, msg_type: str = No
         conditions.append("m.role = ?")
         params.append(role)
     if tool:
-        conditions.append("m.tool_name = ?")
+        conditions.append("instr(',' || COALESCE(m.tool_name, '') || ',', ',' || ? || ',') > 0")
         params.append(tool)
     if session_id:
         conditions.append("m.session_id = ?")
@@ -567,12 +567,112 @@ def get_full_content(conn: sqlite3.Connection, msg_id: int) -> dict:
     }
 
 
-def get_context(conn: sqlite3.Connection, msg_id: int,
-                before: int = 5, after: int = 5) -> list:
-    """获取消息的上下文"""
+def _context_row(row, target_msg_id: int, target_line: int = None) -> dict:
+    return {
+        "id": row[0],
+        "line": row[1],
+        "timestamp": row[2],
+        "type": row[3],
+        "role": row[4],
+        "tool": row[5],
+        "preview": row[6],
+        "is_target": row[0] == target_msg_id if target_msg_id else row[1] == target_line,
+    }
+
+
+def get_pi_context(conn: sqlite3.Connection, msg_id: int,
+                   before: int = 5, after: int = 5) -> list:
+    """Get Pi context by following entry parentId/children instead of raw line windows."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT session_file, line_no, uuid, parent_uuid
+        FROM messages WHERE id = ?
+        """,
+        (msg_id,),
+    )
+    target = cursor.fetchone()
+    if not target:
+        return []
+
+    session_file, target_line, target_uuid, _target_parent = target
+    if not target_uuid:
+        return get_line_context(conn, msg_id, before, after)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    order_col = "record_index" if "record_index" in columns else "id"
+
+    rows = cursor.execute(
+        f"""
+        SELECT id, line_no, timestamp, msg_type, role, tool_name,
+               SUBSTR(content_preview, 1, 150) as preview,
+               uuid, parent_uuid
+        FROM messages
+        WHERE session_file = ? AND uuid IS NOT NULL AND uuid != ''
+        ORDER BY line_no, {order_col}, id
+        """,
+        (session_file,),
+    ).fetchall()
+
+    entry_rows: dict[str, list] = {}
+    entry_line: dict[str, int] = {}
+    parent_map: dict[str, str] = {}
+    children: dict[str, list[str]] = {}
+
+    for row in rows:
+        entry_id = row[7]
+        parent_id = row[8] or ""
+        entry_rows.setdefault(entry_id, []).append(row)
+        entry_line.setdefault(entry_id, row[1])
+        if entry_id not in parent_map:
+            parent_map[entry_id] = parent_id
+            children.setdefault(parent_id, []).append(entry_id)
+
+    for child_list in children.values():
+        child_list.sort(key=lambda entry_id: entry_line.get(entry_id, 0))
+
+    path = []
+    seen = set()
+    current = target_uuid
+    while current and current not in seen and current in entry_rows:
+        path.append(current)
+        seen.add(current)
+        current = parent_map.get(current, "")
+    path.reverse()
+
+    if target_uuid in path:
+        target_index = path.index(target_uuid)
+        context_entries = path[max(0, target_index - before):target_index + 1]
+    else:
+        context_entries = [target_uuid]
+
+    current = target_uuid
+    for _ in range(after):
+        candidates = [
+            child for child in children.get(current, [])
+            if entry_line.get(child, 0) >= target_line
+        ]
+        if not candidates:
+            break
+        current = candidates[0]
+        context_entries.append(current)
+
+    result_rows = []
+    included = set()
+    for entry_id in context_entries:
+        if entry_id in included:
+            continue
+        included.add(entry_id)
+        result_rows.extend(entry_rows.get(entry_id, []))
+
+    return [_context_row(row, msg_id) for row in result_rows]
+
+
+def get_line_context(conn: sqlite3.Connection, msg_id: int,
+                     before: int = 5, after: int = 5) -> list:
+    """Get context using the legacy line window strategy."""
     cursor = conn.cursor()
 
-    # 获取目标消息的行号和文件
     cursor.execute("""
         SELECT session_file, line_no FROM messages WHERE id = ?
     """, (msg_id,))
@@ -581,30 +681,27 @@ def get_context(conn: sqlite3.Connection, msg_id: int,
         return []
 
     session_file, target_line = row
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    order_col = "record_index" if "record_index" in columns else "id"
 
-    # 获取上下文
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT id, line_no, timestamp, msg_type, role, tool_name,
                SUBSTR(content_preview, 1, 150) as preview
         FROM messages
         WHERE session_file = ? AND line_no BETWEEN ? AND ?
-        ORDER BY line_no
+        ORDER BY line_no, {order_col}, id
     """, (session_file, target_line - before, target_line + after))
 
-    results = []
-    for row in cursor.fetchall():
-        results.append({
-            "id": row[0],
-            "line": row[1],
-            "timestamp": row[2],
-            "type": row[3],
-            "role": row[4],
-            "tool": row[5],
-            "preview": row[6],
-            "is_target": row[1] == target_line
-        })
+    return [_context_row(row, msg_id, target_line) for row in cursor.fetchall()]
 
-    return results
+
+def get_context(conn: sqlite3.Connection, msg_id: int,
+                before: int = 5, after: int = 5,
+                platform: str = "codex") -> list:
+    """获取消息的上下文"""
+    if platform == "pi":
+        return get_pi_context(conn, msg_id, before, after)
+    return get_line_context(conn, msg_id, before, after)
 
 
 def list_sessions(conn: sqlite3.Connection, project: str = None) -> list:
@@ -736,7 +833,7 @@ def main():
     parser.add_argument("--role", help="角色过滤 (user/assistant)")
     parser.add_argument("--tool", help="工具名过滤")
     parser.add_argument("--project", help="项目名过滤")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "pi"], required=True,
                         help="会话平台")
     parser.add_argument("--session", dest="session_id", help="会话 ID 过滤")
     parser.add_argument("--list-sessions", action="store_true", help="列出所有会话")
@@ -778,7 +875,7 @@ def main():
                 db_platforms[path] = platform.name
         if not db_paths:
             print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto --platform codex|claude", file=sys.stderr)
+            print("   请先运行: python retrace-index.py --auto --platform codex|claude|pi", file=sys.stderr)
             sys.exit(1)
 
     # 验证数据库存在
@@ -820,7 +917,13 @@ def main():
     elif args.context:
         # 单数据库操作，使用第一个数据库
         conn = sqlite3.connect(str(db_paths[0]))
-        result = get_context(conn, args.context, args.before, args.after)
+        result = get_context(
+            conn,
+            args.context,
+            args.before,
+            args.after,
+            db_platforms.get(db_paths[0], args.platform),
+        )
         format_output(result, "context", args.json)
         conn.close()
 

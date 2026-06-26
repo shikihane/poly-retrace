@@ -1,12 +1,12 @@
 # poly-retrace
 
-搜索和分析 Codex 与 Claude Code 的会话历史，基于 SQLite FTS 全文索引、BM25 排序，以及可选的 AI 摘要能力。
+搜索和分析 Codex、Claude Code 与 pi 的会话历史，基于 SQLite FTS 全文索引、BM25 排序，以及可选的 AI 摘要能力。
 
 English version: [README.md](./README.md).
 
 ## 功能
 
-- 为每个项目的 Codex / Claude Code 会话 JSONL 建立独立的 SQLite 索引。
+- 为每个项目的 Codex / Claude Code / Pi 会话 JSONL 建立独立的 SQLite 索引。
 - 全文检索 + BM25 排序，额外提供 trigram 混合模式，用于中文、路径、连字符标识符和粘贴的日志片段。
 - 分层检索输出（`stats` -> `list` -> `detail` -> `full`），帮助控制 token 预算。
 - 单会话历史抽取（chronicle），输出 TOON / JSON，便于交接或存入记忆。
@@ -17,9 +17,10 @@ English version: [README.md](./README.md).
 
 - Codex 会话：`%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`，以及 `archived_sessions`；默认 home 是 `~/.codex`。
 - Claude Code 会话：`%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`；默认 home 是 `~/.claude`。
+- Pi 会话：`%PI_AGENT_HOME%\sessions\**\*.jsonl` / `$PI_AGENT_HOME/sessions/**/*.jsonl`；默认 home 是 `~/.pi/agent`。
 - 索引数据库位于对应平台 home 下的 `projects/<encoded-cwd>/retrace-index.db`。
 
-必须显式传 `--platform codex` 或 `--platform claude`。
+必须显式传 `--platform codex`、`--platform claude` 或 `--platform pi`。
 
 ### 路径编码
 
@@ -45,6 +46,7 @@ poly-retrace/
 |   |   |-- common.py             # 共享数据模型
 |   |   |-- codex.py              # Codex 路径与解析
 |   |   |-- claude.py             # Claude Code 路径与解析
+|   |   |-- pi.py                 # Pi 路径与解析
 |   |-- retrace-index.py          # 建立 / 刷新 FTS 索引
 |   |-- retrace-search.py         # 搜索（FTS 或混合）
 |   |-- retrace-locate.py         # 定位会话文件
@@ -86,6 +88,9 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 # Claude Code
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 
+# Pi
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
+
 # 查看统计
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -93,6 +98,7 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 ```sh
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform pi --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -109,6 +115,7 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 
 # 混合查询（中英混合、代码、日志优先使用）
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform pi --hybrid "多 pi 编排 worker_done" --project poly-retrace
 
 # 过滤
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
@@ -161,6 +168,7 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "error" --platform codex --prompt "classify error types" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "bug" --platform claude --prompt "summarize" --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "worker_done" --platform pi --prompt "summarize pi orchestration work" --project poly-retrace
 ```
 
 结果集较小时走一次 `codex exec`；较大时会被自动分块并行处理。小结果约 5-7 秒/次，大结果每块约 15-22 秒，最多 20 个并发。
@@ -186,13 +194,13 @@ Chronicle 会保留：代码片段、shell / git / npm 命令、涉及的文件�
 
 ## 技能入口
 
-`skills/retrace/SKILL.md` 是 Claude Code 的 skill 入口，触发语包括“查找以前的对话”、“回忆做过什么”、“搜索历史”、“恢复文件”等。skill 最终调用的就是上述脚本。
+`skills/retrace/SKILL.md` 是支持的 agent 客户端的 skill 入口，触发语包括“查找以前的对话”、“回忆做过什么”、“搜索历史”、“恢复文件”等。skill 最终调用的就是上述脚本。
 
 ## 故障排查
 
 | 问题                                | 解决方法                                                                                     |
 |-------------------------------------|----------------------------------------------------------------------------------------------|
-| 提示“索引数据库不存在”              | 运行 `retrace-index.py --auto --platform <codex|claude> --project <name> --no-summary`。    |
+| 提示“索引数据库不存在”              | 运行 `retrace-index.py --auto --platform <codex|claude|pi> --project <name> --no-summary`。 |
 | 搜不到结果                          | 检查 `--project` 过滤，放宽关键词，然后用 `--hybrid` 重试。                                  |
 | 查询含 `-` 时 FTS 报错              | 升级到当前脚本；遇到非单词字符时会自动加引号。                                               |
 | 控制台输出乱码                      | 使用 PowerShell 7 运行；脚本也会强制 UTF-8 stdio。                                           |
