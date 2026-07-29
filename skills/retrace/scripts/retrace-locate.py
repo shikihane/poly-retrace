@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 retrace-locate.py - 定位 Claude Code 会话文件
-版本: 1.1.0
+版本: 1.2.0
 
 功能：
 - 定位当前会话的 JSONL 文件
@@ -36,10 +36,11 @@ from retrace_paths import (
     iter_session_files,
     read_first_json_record,
 )
+from platforms import kimi as kimi_platform
 
 configure_utf8_stdio()
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def get_claude_dir() -> Path:
@@ -104,6 +105,8 @@ def get_codex_session_meta(session_file: Path) -> Dict:
 
 def get_session_cwd(session_file: Path, platform: str = "codex") -> str:
     """Return the cwd recorded by a session file when available."""
+    if platform == "kimi":
+        return kimi_platform.read_session_state(session_file).get("workDir", "")
     if platform == "claude":
         first_record = read_first_json_record(session_file)
         return first_record.get("cwd", "")
@@ -139,28 +142,40 @@ def find_latest_session(project_dir: Path) -> Optional[Path]:
 def locate_session(cwd: str = None, session_id: str = None, platform: str = "codex") -> dict:
     """定位会话文件"""
     projects_dir = get_projects_dir(platform)
-    if not projects_dir.exists():
-        return {"error": f"Codex projects 目录不存在: {projects_dir}"}
 
     # 方法 1: 指定了 session_id
     if session_id:
         for retrace_platform in get_platforms(platform):
-            platform_file = find_platform_session_file(session_id, retrace_platform.name)
-            if platform_file:
+            platform_files = find_session_files(session_id, retrace_platform.name)
+            if platform_files:
+                platform_file = platform_files[0]
                 cwd = get_session_cwd(platform_file, retrace_platform.name)
                 if cwd:
                     project_name = encode_path(cwd)
+                elif retrace_platform.name == "kimi":
+                    project_name = None
                 else:
                     project_name = platform_file.relative_to(retrace_platform.projects_dir).parts[0]
-                result = _build_result(session_id, platform_file, retrace_platform.projects_dir / project_name)
+                result = _build_result(
+                    session_id,
+                    platform_file,
+                    retrace_platform.projects_dir / project_name if project_name else None,
+                    retrace_platform.name,
+                    platform_files,
+                )
                 result["platform"] = retrace_platform.name
                 return result
+        if not projects_dir.exists():
+            return {"error": f"找不到会话: {session_id}"}
         for project_dir in projects_dir.iterdir():
             if project_dir.is_dir():
                 session_file = find_session_file(project_dir, session_id)
                 if session_file:
-                    return _build_result(session_id, session_file, project_dir)
+                    return _build_result(session_id, session_file, project_dir, platform)
         return {"error": f"找不到会话: {session_id}"}
+
+    if not projects_dir.exists():
+        return {"error": f"{platform} projects 目录不存在: {projects_dir}"}
 
     # 方法 2: 从 history.jsonl 获取当前会话
     current_session_id = get_current_session_id()
@@ -194,15 +209,24 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
     return {"error": f"找不到项目目录: {encoded_cwd}"}
 
 
-def _build_result(session_id: str, session_file: Path, project_dir: Path) -> dict:
+def _build_result(
+    session_id: str,
+    session_file: Path,
+    project_dir: Optional[Path],
+    platform: str = "codex",
+    session_files: List[Path] = None,
+) -> dict:
     """构建返回结果"""
     stat = session_file.stat()
+    all_files = session_files or [session_file]
     return {
         "session_id": session_id,
         "session_file": str(session_file),
-        "project_dir": project_dir.name,
-        "project_path": decode_path(project_dir.name),
+        "session_files": [str(path) for path in all_files],
+        "project_dir": project_dir.name if project_dir else None,
+        "project_path": decode_path(project_dir.name, platform) if project_dir else "",
         "file_size": stat.st_size,
+        "total_size": sum(path.stat().st_size for path in all_files),
         "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
     }
 
@@ -253,6 +277,10 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                 except ValueError:
                     name = session_file.parent.name
                 cwd = cwd or decode_path(name, retrace_platform.name)
+            elif retrace_platform.name == "kimi":
+                if not cwd:
+                    continue
+                name = encode_path(cwd)
             elif cwd:
                 name = encode_path(cwd)
             else:
@@ -267,9 +295,17 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                 "latest_modified": None,
                 "has_index": False,
                 "index_size": 0,
+                "_session_ids": set(),
             })
             stat = session_file.stat()
-            entry["session_count"] += 1
+            logical_session_id = (
+                kimi_platform.session_id_for_wire(session_file)
+                if retrace_platform.name == "kimi"
+                else session_file.stem
+            )
+            if logical_session_id not in entry["_session_ids"]:
+                entry["_session_ids"].add(logical_session_id)
+                entry["session_count"] += 1
             entry["total_size"] += stat.st_size
             modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
             if not entry["latest_modified"] or modified > entry["latest_modified"]:
@@ -288,6 +324,7 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                     "latest_modified": None,
                     "has_index": False,
                     "index_size": 0,
+                    "_session_ids": set(),
                 })
                 item.update({
                     "has_index": db_path.exists(),
@@ -296,6 +333,8 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                 projects.append(item)
 
     projects.extend(discovered.values())
+    for project in projects:
+        project.pop("_session_ids", None)
     return sorted(projects, key=lambda p: p.get("latest_modified") or "", reverse=True)
 
 
@@ -303,7 +342,42 @@ def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
     """列出项目的所有会话（含摘要）"""
     projects_dir = get_projects_dir(platform)
 
+    if platform == "kimi":
+        grouped: Dict[tuple[str, str], List[Path]] = {}
+        for wire_file in iter_session_files("kimi"):
+            cwd = get_session_cwd(wire_file, "kimi")
+            if not cwd:
+                continue
+            bucket = encode_path(cwd)
+            if project_name.lower() not in bucket.lower():
+                continue
+            session_id = kimi_platform.session_id_for_wire(wire_file)
+            grouped.setdefault((bucket, session_id), []).append(wire_file)
+
+        sessions = []
+        summaries_by_bucket = {}
+        for (bucket, session_id), _ in grouped.items():
+            files = find_session_files(session_id, "kimi")
+            project_dir = projects_dir / bucket
+            summaries = summaries_by_bucket.setdefault(
+                bucket, get_session_summaries(project_dir)
+            )
+            info = summaries.get(session_id, {})
+            latest = max(path.stat().st_mtime for path in files)
+            sessions.append({
+                "session_id": session_id,
+                "file": str(files[0]),
+                "files": [str(path) for path in files],
+                "size": sum(path.stat().st_size for path in files),
+                "modified": datetime.fromtimestamp(latest).isoformat(),
+                "message_count": info.get("message_count"),
+                "summary": info.get("summary"),
+            })
+        return sorted(sessions, key=lambda item: item["modified"], reverse=True)
+
     # 支持模糊匹配项目名
+    if not projects_dir.exists():
+        return []
     project_dir = None
     for pd in projects_dir.iterdir():
         if pd.is_dir() and project_name.lower() in pd.name.lower():
@@ -338,7 +412,7 @@ def main():
     parser.add_argument("--session-id", help="指定会话 ID")
     parser.add_argument("--list", action="store_true", help="列出项目或会话")
     parser.add_argument("--project", help="指定项目名")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
                         help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")

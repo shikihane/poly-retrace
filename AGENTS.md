@@ -1,10 +1,10 @@
 # AGENTS.md - Poly-Retrace Skill
 
-Codex and Claude Code session history search and analysis skill.
+Codex, Claude Code, and Kimi Code session history search and analysis skill.
 
 ## Overview
 
-Poly-retrace searches and analyzes Codex or Claude Code conversation history using SQLite FTS with BM25 ranking.
+Poly-retrace searches and analyzes Codex, Claude Code, or Kimi Code conversation history using SQLite FTS with BM25 ranking.
 
 ## Architecture
 
@@ -18,7 +18,8 @@ poly-retrace/
 │           ├── platforms/
 │           │   ├── common.py
 │           │   ├── codex.py
-│           │   └── claude.py
+│           │   ├── claude.py
+│           │   └── kimi.py
 │           ├── retrace_common.py
 │           ├── retrace-locate.py
 │           ├── retrace-index.py
@@ -91,6 +92,7 @@ Always choose a platform explicitly when you do not want the Codex default:
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for routine local indexing. AI summary and analysis paths call `codex exec`.
@@ -105,8 +107,9 @@ AI summary and analysis commands run without bypassing sandbox/approval checks b
 |----------|-----------------|----------------|
 | Codex | `$HOME\.codex\sessions\**\*.jsonl`, `$HOME\.codex\archived_sessions\*.jsonl` | `$HOME\.codex\projects\<encoded-cwd>\retrace-index.db` |
 | Claude Code | `$HOME\.claude\projects\<encoded-cwd>\*.jsonl` | `$HOME\.claude\projects\<encoded-cwd>\retrace-index.db` |
+| Kimi Code | `$env:KIMI_CODE_HOME\sessions\*\session_*\agents\*\wire.jsonl` (default home `$HOME\.kimi-code`) | `$env:KIMI_CODE_HOME\projects\<encoded-cwd>\retrace-index.db` |
 
-Each platform keeps its own project index root. Do not mix Codex and Claude indexes in the same directory.
+Each platform keeps its own project index root. Do not mix indexes from different platforms in the same directory. `KIMI_CODE_HOME` overrides the Kimi home.
 
 ### Path Encoding
 
@@ -116,6 +119,8 @@ Windows paths are encoded with the drive separator as `--` and path separators a
 
 Because hyphens can also appear in real path components, decoding is best-effort unless a Codex `session_meta.payload.cwd` record is available.
 
+Kimi is different: project attribution and decoding use only the session's `state.json.workDir`. Missing or invalid state means no project attribution; never parse the generated `wd_` directory name. See `skills/retrace/references/adr-001-kimi-project-attribution.md`.
+
 ## Script Reference
 
 ### Index
@@ -123,6 +128,7 @@ Because hyphens can also appear in real path components, decoding is best-effort
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
 ```
 
@@ -133,6 +139,8 @@ Because hyphens can also appear in real path components, decoding is best-effort
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "query" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --hybrid "录音确认超时 req_id" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --full <id>
 ```
@@ -143,6 +151,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --session-id <uuid> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --list
 ```
 
@@ -157,6 +166,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -166,7 +176,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 |--------|--------|
 | `--type` | `session_meta`, `turn_context`, `user`, `assistant`, `tool_use`, `tool_result` |
 | `--role` | `user`, `assistant`, `tool` |
-| `--tool` | `shell_command`, `apply_patch`, `read_mcp_resource`, etc. |
+| `--tool` | Platform-native names: `shell_command`, `apply_patch`, `Bash`, `Read`, `Skill`, etc. |
 | `--project` | Project name or encoded path fragment |
 | `--session` | Session UUID |
 | `--since` | ISO date |
@@ -176,7 +186,9 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 
 | Issue | Solution |
 |-------|----------|
-| "索引数据库不存在" | Run `retrace-index.py --auto --platform codex --project <name> --no-summary` or the matching `claude` command |
+| "索引数据库不存在" | Run `retrace-index.py --auto --platform <codex\|claude\|kimi> --project <name> --no-summary` |
 | No results | Check project filter, then retry complex Chinese/code/log queries with `--hybrid` |
+| Kimi session is not attributed | Check that its `state.json` is valid and has `workDir`; do not infer from `wd_` |
+| Kimi tool filter has no results | Use the original Kimi tool name (`Bash`, `Read`, `Skill`, etc.) |
 | Query with `-` errors | Search now quotes plain text FTS queries; rebuild if using old scripts |
 | Garbled console output | Run through PowerShell 7; scripts also force UTF-8 stdio |

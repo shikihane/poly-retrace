@@ -1,12 +1,12 @@
 ---
 name: retrace
 description: This skill should be used when the user asks to "find past conversations", "recall what was done", "search history", "look up previous work", "how did we handle X", "what was that implementation", "find similar code", "search session", "analyze conversation history", "recover file", "restore previous version", or mentions terms like "earlier", "before", "previously", "last time", "history", "past work".
-version: 0.3.0
+version: 0.4.0
 ---
 
-# Retrace - Codex and Claude Code Session History Search
+# Retrace - Codex, Claude Code, and Kimi Code Session History Search
 
-Search and analyze Codex or Claude Code conversation history using SQLite FTS full-text search with BM25 ranking.
+Search and analyze Codex, Claude Code, or Kimi Code conversation history using SQLite FTS full-text search with BM25 ranking.
 
 ## Architecture
 
@@ -14,9 +14,11 @@ Search and analyze Codex or Claude Code conversation history using SQLite FTS fu
 - Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
 - Codex indexes: `~/.codex/projects/<encoded-cwd>/retrace-index.db`.
 - Claude Code sessions and indexes: `~/.claude/projects/<encoded-cwd>/*.jsonl`, `~/.claude/projects/<encoded-cwd>/*/subagents/*.jsonl`, and `retrace-index.db`, overridable with `CLAUDE_HOME`.
-- Platform selection is mandatory: pass `--platform codex` or `--platform claude`.
+- Kimi Code sessions: `$KIMI_CODE_HOME/sessions/*/session_*/agents/*/wire.jsonl`; default home is `~/.kimi-code`. Indexes live at `~/.kimi-code/projects/<encoded-cwd>/retrace-index.db`.
+- Kimi project attribution comes only from the session's `state.json.workDir`. If it is unavailable, skip attribution; never decode the generated `wd_` directory name.
+- The default platform is `codex`. Pass `--platform claude` or `--platform kimi` explicitly for other platforms.
 - Windows-first shell: prefer PowerShell 7 (`pwsh`) on this setup, but Unix `sh` examples are packaged under `examples/`.
-- Platform modules: `platforms/codex.py` and `platforms/claude.py` own platform-specific paths; `platforms/common.py` holds the shared data model.
+- Platform modules: `platforms/codex.py`, `platforms/claude.py`, and `platforms/kimi.py` own platform-specific paths and parsing; `platforms/common.py` holds the shared data model.
 - Compatibility facade: `retrace_paths.py` exposes the small public API used by scripts.
 
 ## Core Workflow
@@ -52,11 +54,13 @@ PYTHON_CMD="python3"
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 ```
 
 ```sh
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for normal local use. Summary and analysis commands call `codex exec`, which is slower and spends model calls.
@@ -67,6 +71,7 @@ They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNS
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --list-sessions --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude --list-sessions --project poly-retrace --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --list-sessions --project poly-retrace --json
 ```
 
 ## Search Sessions
@@ -76,7 +81,10 @@ They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNS
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "error" --level stats --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --hybrid "录音确认超时 req_id" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --context <id> --before 5 --after 5 --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --full <id> --project poly-retrace
 ```
 
 Use `--hybrid` for mixed Chinese/code/log queries. It combines the normal FTS index with a selective trigram index, so it is better for Chinese phrases, hyphenated terms, paths, and substrings.
@@ -90,10 +98,22 @@ Prefer `--hybrid` immediately when queries look like `录音确认超时 req_id`
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-analyze.py" "query" --platform claude --prompt "summarize" --json
 ```
 
+AI analysis still runs through `codex exec`; Kimi support applies to index, search, locate, and chronicle, not to a Kimi-native analysis backend.
+
+## Locate Sessions
+
+```powershell
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --list --project poly-retrace --json
+```
+
+For Kimi, a located session returns the main Wire file first, followed by every subagent Wire file.
+
 ## Session Chronicle
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -120,11 +140,19 @@ Default workflow: `stats` -> `list` -> `detail` -> `full`.
 |--------|---------|
 | `--type` | `tool_result`, `tool_use`, `user`, `assistant` |
 | `--role` | `user`, `assistant`, `tool` |
-| `--tool` | `shell_command`, `apply_patch`, `Read` |
+| `--tool` | `shell_command`, `apply_patch`, `Read`, `Bash` (native names are platform-specific) |
 | `--project` | Project name or encoded path fragment |
 | `--session` | Session UUID |
 | `--since` | Start date (ISO) |
 | `--until` | End date (ISO) |
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| Kimi index is missing | Run `retrace-index.py --auto --platform kimi --project <name> --no-summary`. |
+| Kimi session is skipped | Verify `<session>/state.json` exists and contains the real `workDir`; Retrace does not guess from `wd_`. |
+| Kimi tool filter has no results | Use the native Kimi name such as `Bash`, `Read`, or `Skill`; names are not remapped across platforms. |
 
 ## Red Flags - Use Retrace
 

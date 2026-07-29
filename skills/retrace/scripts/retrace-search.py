@@ -36,7 +36,7 @@ from retrace_paths import configure_utf8_stdio, get_platform, get_platforms
 
 configure_utf8_stdio()
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def prepare_fts_query(query: str) -> str:
@@ -736,7 +736,7 @@ def main():
     parser.add_argument("--role", help="角色过滤 (user/assistant)")
     parser.add_argument("--tool", help="工具名过滤")
     parser.add_argument("--project", help="项目名过滤")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
                         help="会话平台")
     parser.add_argument("--session", dest="session_id", help="会话 ID 过滤")
     parser.add_argument("--list-sessions", action="store_true", help="列出所有会话")
@@ -778,7 +778,7 @@ def main():
                 db_platforms[path] = platform.name
         if not db_paths:
             print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto --platform codex|claude", file=sys.stderr)
+            print("   请先运行: python retrace-index.py --auto --platform codex|claude|kimi", file=sys.stderr)
             sys.exit(1)
 
     # 验证数据库存在

@@ -37,7 +37,12 @@ if (Test-Path -LiteralPath $skillMd -PathType Leaf) {
 Write-Host ""
 Write-Host "Checking references..."
 $referencesDir = Join-Path $skillDir "references"
-foreach ($name in @("architecture.md", "chronicle-format.md", "recover-guide.md")) {
+foreach ($name in @(
+    "architecture.md",
+    "chronicle-format.md",
+    "recover-guide.md",
+    "adr-001-kimi-project-attribution.md"
+)) {
     Test-RequiredFile (Join-Path $referencesDir $name)
 }
 
@@ -63,6 +68,7 @@ foreach ($name in @(
 )) {
     Test-RequiredFile (Join-Path $PSScriptRoot $name)
 }
+Test-RequiredFile (Join-Path $PSScriptRoot "platforms\kimi.py")
 
 Write-Host ""
 Write-Host "=== Validation Summary ==="

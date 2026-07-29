@@ -2,7 +2,9 @@
 
 ## Overview
 
-The chronicle command extracts key events from a Claude Code session and outputs them in TOON (Tabular Object Notation) format.
+The chronicle command extracts key events from a Codex, Claude Code, or Kimi Code session and outputs them in TOON (Tabular Object Notation) format.
+
+For Kimi, Chronicle merges main and subagent Wire files by timestamp, preserves native tool names, and excludes thinking and protocol-only events.
 
 ## TOON Format
 

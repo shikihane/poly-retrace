@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 retrace-index.py - Claude Code 会话日志索引器
-版本: 2.0.0
+版本: 2.2.0
 
 功能：
 - 按项目建立独立索引
@@ -39,10 +39,11 @@ from retrace_paths import (
     get_platform,
     get_platforms,
 )
+from platforms import kimi as kimi_platform
 
 configure_utf8_stdio()
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 PREVIEW_LIMIT = 300
 SEARCH_TEXT_LIMIT = 8192
 TRIGRAM_TOOL_RESULT_LIMIT = 4096
@@ -130,6 +131,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             msg_type TEXT,
             role TEXT,
             tool_name TEXT,
+            agent_id TEXT DEFAULT '',
             content_preview TEXT,
             search_text TEXT,
             content_hash TEXT,
@@ -173,6 +175,8 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
     if "search_text" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN search_text TEXT")
         conn.execute("UPDATE messages SET search_text = content_preview WHERE search_text IS NULL")
+    if "agent_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN agent_id TEXT DEFAULT ''")
 
     fts_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")}
     if "search_text" not in fts_columns:
@@ -323,9 +327,18 @@ def extract_codex_project_name(record: dict) -> Optional[str]:
     return encode_path(cwd) if cwd else None
 
 
-def normalize_record(data: dict) -> Optional[dict]:
+def normalize_record(data: dict, kimi_context: Optional[dict] = None) -> Optional[dict]:
     """Normalize Claude-style and Codex-style JSONL records into index fields."""
     record_type = data.get("type", "")
+
+    if record_type in {"context.append_message", "context.append_loop_event"}:
+        context = kimi_context or {}
+        return kimi_platform.normalize_wire_record(
+            data,
+            session_id=context.get("session_id", ""),
+            agent_id=context.get("agent_id", ""),
+            tool_names=context.get("tool_names"),
+        )
 
     if record_type in {"user", "assistant", "tool_result"}:
         message = data.get("message", {})
@@ -454,8 +467,88 @@ def insert_trigram_if_selective(conn: sqlite3.Connection, rowid: int, search_tex
     )
 
 
+def insert_normalized_message(
+    conn: sqlite3.Connection,
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    line_no: int,
+    byte_offset: int,
+    byte_length: int,
+    normalized: dict,
+) -> bool:
+    """Insert one normalized record and its FTS rows."""
+    content_preview = normalized.get("content_preview", "")
+    search_text = normalized.get("search_text", content_preview)
+    content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
+    values = (
+        source_file,
+        line_no,
+        byte_offset,
+        byte_length,
+        normalized.get("uuid", ""),
+        normalized.get("parent_uuid", ""),
+        normalized.get("session_id", ""),
+        normalized.get("timestamp", ""),
+        normalized.get("msg_type", ""),
+        normalized.get("role", ""),
+        normalized.get("tool_name") or "",
+        normalized.get("agent_id", ""),
+        content_preview,
+        search_text,
+        content_hash,
+    )
+    try:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO messages
+            (session_file, line_no, byte_offset, byte_length,
+             uuid, parent_uuid, session_id, timestamp, msg_type, role,
+             tool_name, agent_id, content_preview, search_text, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+    except sqlite3.IntegrityError:
+        return False
+    if cursor.rowcount <= 0:
+        return False
+
+    msg_id = cursor.lastrowid
+    cursor.execute(
+        """
+        INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            msg_id,
+            search_text,
+            normalized.get("msg_type", ""),
+            normalized.get("role", ""),
+            normalized.get("tool_name") or "",
+        ),
+    )
+    insert_trigram_if_selective(
+        conn,
+        msg_id,
+        search_text,
+        normalized.get("msg_type", ""),
+        normalized.get("role", ""),
+        normalized.get("tool_name") or "",
+    )
+    return True
+
+
+def remember_tool_name(normalized: Optional[dict], tool_names: dict) -> None:
+    """Remember a Kimi tool call so a later result retains its native name."""
+    if not normalized or normalized.get("msg_type") != "tool_use":
+        return
+    tool_call_id = normalized.get("tool_call_id", "")
+    if tool_call_id:
+        tool_names[tool_call_id] = normalized.get("tool_name", "")
+
+
 def index_session_file(conn: sqlite3.Connection, session_file: str,
-                       incremental: bool = True) -> tuple:
+                       incremental: bool = True, platform_name: str = None) -> tuple:
     """索引单个会话文件，返回 (新索引消息数, 会话ID集合)"""
     cursor = conn.cursor()
 
@@ -464,28 +557,61 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
     row = cursor.fetchone()
     start_offset = int(row[0]) if row and incremental else 0
 
-    file_size = os.path.getsize(session_file)
-    if start_offset >= file_size:
-        return 0, set()
-
     indexed_count = 0
     line_no = 0
     session_ids = set()
     current_session_id = ""
+    session_path = Path(session_file)
+    is_kimi = platform_name == "kimi" or kimi_platform.session_dir_for_wire(session_path) is not None
+    tool_names = {}
+    kimi_context = None
+    if is_kimi:
+        current_session_id = kimi_platform.session_id_for_wire(session_path)
+        kimi_context = {
+            "session_id": current_session_id,
+            "agent_id": kimi_platform.agent_id_for_wire(session_path),
+            "tool_names": tool_names,
+        }
+
+    file_size = os.path.getsize(session_file)
+    should_add_kimi_meta = (
+        is_kimi
+        and start_offset == 0
+        and kimi_context["agent_id"] == "main"
+        and kimi_platform.normalize_session_meta(session_path) is not None
+    )
+    if start_offset >= file_size and not should_add_kimi_meta:
+        return 0, set()
+
+    if should_add_kimi_meta:
+        state_path = kimi_platform.session_dir_for_wire(session_path) / "state.json"
+        session_meta = kimi_platform.normalize_session_meta(session_path)
+        if insert_normalized_message(
+            conn,
+            cursor,
+            str(state_path),
+            1,
+            0,
+            state_path.stat().st_size,
+            session_meta,
+        ):
+            indexed_count += 1
+        if current_session_id:
+            session_ids.add(current_session_id)
 
     if start_offset > 0:
         with open(session_file, 'rb') as f:
             while f.tell() < start_offset:
                 line = f.readline()
                 line_no += 1
-                if line_no == 1:
-                    try:
-                        record = json.loads(line.decode("utf-8"))
-                        normalized = normalize_record(record)
-                        if normalized and record.get("type") == "session_meta":
-                            current_session_id = normalized.get("session_id", "")
-                    except Exception:
-                        pass
+                try:
+                    record = json.loads(line.decode("utf-8"))
+                    normalized = normalize_record(record, kimi_context)
+                    if normalized and record.get("type") == "session_meta":
+                        current_session_id = normalized.get("session_id", "")
+                    remember_tool_name(normalized, tool_names)
+                except Exception:
+                    pass
 
     with open(session_file, 'rb') as f:
         f.seek(start_offset)
@@ -501,52 +627,27 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 byte_offset += line_length
                 continue
 
-            normalized = normalize_record(data)
+            normalized = normalize_record(data, kimi_context)
             if not normalized:
                 byte_offset += line_length
                 continue
+
+            remember_tool_name(normalized, tool_names)
 
             if data.get("type") == "session_meta":
                 current_session_id = normalized.get("session_id", "")
             elif current_session_id and not normalized.get("session_id"):
                 normalized["session_id"] = current_session_id
 
-            uuid = normalized.get("uuid", "")
-            parent_uuid = normalized.get("parent_uuid", "")
             session_id = normalized.get("session_id", "")
-            timestamp = normalized.get("timestamp", "")
-            msg_type = normalized.get("msg_type", "")
-            role = normalized.get("role", "")
 
             if session_id:
                 session_ids.add(session_id)
 
-            tool_name = normalized.get("tool_name")
-            content_preview = normalized.get("content_preview", "")
-            search_text = normalized.get("search_text", content_preview)
-            content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
-
-            try:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO messages
-                    (session_file, line_no, byte_offset, byte_length,
-                     uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                     tool_name, content_preview, search_text, content_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (session_file, line_no, byte_offset, line_length,
-                      uuid, parent_uuid, session_id, timestamp, msg_type, role,
-                      tool_name, content_preview, search_text, content_hash))
-
-                if cursor.rowcount > 0:
-                    msg_id = cursor.lastrowid
-                    indexed_count += 1
-                    cursor.execute('''
-                        INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (msg_id, search_text, msg_type, role, tool_name or ""))
-                    insert_trigram_if_selective(conn, msg_id, search_text, msg_type, role, tool_name or "")
-            except sqlite3.IntegrityError:
-                pass
+            if insert_normalized_message(
+                conn, cursor, session_file, line_no, byte_offset, line_length, normalized
+            ):
+                indexed_count += 1
 
             byte_offset += line_length
 
@@ -594,7 +695,9 @@ def choose_canonical_session_file(session_id: str, current_file: str, candidate_
         p = Path(path)
         if p.stem == session_id and "subagents" not in p.parts:
             return (0, path)
-        if "subagents" in p.parts:
+        if p.name == "wire.jsonl" and p.parent.name == "main" and p.parent.parent.name == "agents":
+            return (0, path)
+        if "subagents" in p.parts or (p.name == "wire.jsonl" and p.parent.parent.name == "agents"):
             return (2, path)
         return (1, path)
 
@@ -842,6 +945,9 @@ def detect_session_project(session_file: Path, platform: RetracePlatform) -> Opt
             return session_file.relative_to(platform.projects_dir).parts[0]
         except ValueError:
             return session_file.parent.name
+    if platform.name == "kimi":
+        work_dir = kimi_platform.read_session_state(session_file).get("workDir")
+        return encode_path(work_dir) if work_dir else None
 
     try:
         with open(session_file, "r", encoding="utf-8") as f:
@@ -880,7 +986,8 @@ def discover_project_files(platform: RetracePlatform, project_filter: str = None
 
 def index_session_files_for_project(project_dir: Path, session_files: List[Path],
                                     incremental: bool = True,
-                                    generate_summaries: bool = True) -> int:
+                                    generate_summaries: bool = True,
+                                    platform_name: str = None) -> int:
     """Index an explicit set of Codex session files into one project DB."""
     import time
     start_time = time.time()
@@ -894,7 +1001,9 @@ def index_session_files_for_project(project_dir: Path, session_files: List[Path]
     total = 0
     all_session_ids = set()
     for session_file in sorted(session_files):
-        count, session_ids = index_session_file(conn, str(session_file), incremental)
+        count, session_ids = index_session_file(
+            conn, str(session_file), incremental, platform_name
+        )
         all_session_ids.update(session_ids)
         if count > 0:
             print(f"  📝 {session_file.name[:40]}... (+{count})")
@@ -935,7 +1044,9 @@ def index_all_projects(project_filter: str = None, incremental: bool = True,
         print(f"🧭 platform={platform.name}")
         for pd, session_files in sorted(grouped.items(), key=lambda item: item[0].name):
             print(f"📂 {pd.name}")
-            count = index_session_files_for_project(pd, session_files, incremental, generate_summaries)
+            count = index_session_files_for_project(
+                pd, session_files, incremental, generate_summaries, platform.name
+            )
             total += count
 
     if platform_count == 0:
@@ -1010,7 +1121,7 @@ def main():
     parser = argparse.ArgumentParser(description="Claude Code 会话日志索引器 (按项目独立索引)")
     parser.add_argument("--auto", action="store_true", help="自动索引所有项目")
     parser.add_argument("--project", help="过滤项目名")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
                         help="会话平台")
     parser.add_argument("--no-incremental", action="store_true", help="重建索引")
     parser.add_argument("--no-summary", action="store_true", help="不生成会话摘要")

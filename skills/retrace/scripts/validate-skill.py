@@ -35,7 +35,12 @@ def main() -> int:
                 errors.append(f"SKILL.md:{field}")
 
     print("\nChecking references...")
-    for name in ("architecture.md", "chronicle-format.md", "recover-guide.md"):
+    for name in (
+        "architecture.md",
+        "chronicle-format.md",
+        "recover-guide.md",
+        "adr-001-kimi-project-attribution.md",
+    ):
         check_file(SKILL_DIR / "references" / name, name, errors)
 
     print("\nChecking examples...")
@@ -61,6 +66,7 @@ def main() -> int:
         "retrace_common.py",
         "validate-skill.py",
         "validate-skill.ps1",
+        "platforms/kimi.py",
     ):
         check_file(SCRIPT_DIR / name, name, errors)
 

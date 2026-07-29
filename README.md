@@ -1,12 +1,12 @@
 # poly-retrace
 
-Search and analyze Codex and Claude Code conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
+Search and analyze Codex, Claude Code, and Kimi Code conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
 
 Chinese version: [README_CN.md](./README_CN.md).
 
 ## What it does
 
-- Indexes every Codex and Claude Code session JSONL into a per-project SQLite database.
+- Indexes Codex and Claude Code session JSONL plus Kimi Wire files into per-project SQLite databases.
 - Full-text search with BM25 ranking, plus a hybrid trigram mode for Chinese, paths, hyphenated names, and pasted log fragments.
 - Layered search output (`stats` -> `list` -> `detail` -> `full`) to keep token budgets under control.
 - Single-session chronicle extraction to TOON / JSON for handoff or memory.
@@ -17,9 +17,12 @@ Chinese version: [README_CN.md](./README_CN.md).
 
 - Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
 - Claude Code sessions: `%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`; default home is `~/.claude`.
+- Kimi Code sessions: `%KIMI_CODE_HOME%\sessions\*\session_*\agents\*\wire.jsonl` / `$KIMI_CODE_HOME/sessions/*/session_*/agents/*/wire.jsonl`; default home is `~/.kimi-code`.
 - Indexes live under each platform home at `projects/<encoded-cwd>/retrace-index.db`.
 
-Pass `--platform codex` or `--platform claude` explicitly.
+The default platform is `codex`. Pass `--platform claude` or `--platform kimi` for other platforms. `KIMI_CODE_HOME` overrides the Kimi home.
+
+Kimi project attribution comes only from each session's `state.json.workDir`. A missing or invalid state file leaves the session unattributed; Retrace never guesses from the generated `wd_` directory name. See [ADR 001](./skills/retrace/references/adr-001-kimi-project-attribution.md).
 
 ### Path encoding
 
@@ -31,7 +34,7 @@ Unix paths are encoded by stripping the leading slash and replacing path separat
 
 `/home/user/example-project` -> `home-user-example-project`.
 
-Hyphens can appear in real path components, so decoding is best-effort unless a Codex `session_meta.payload.cwd` record is available.
+Hyphens can appear in real path components, so decoding is best-effort unless Codex provides `session_meta.payload.cwd` or Kimi provides `state.json.workDir`.
 
 ## Layout
 
@@ -45,6 +48,7 @@ poly-retrace/
 |   |   |-- common.py             # shared data model
 |   |   |-- codex.py              # Codex paths and parsing
 |   |   |-- claude.py             # Claude Code paths and parsing
+|   |   |-- kimi.py               # Kimi paths, state, and Wire parsing
 |   |-- retrace-index.py          # build / refresh FTS index
 |   |-- retrace-search.py         # search (FTS or hybrid)
 |   |-- retrace-locate.py         # locate session files
@@ -86,6 +90,9 @@ Always ensure the index is current before searching.
 # Claude Code
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 
+# Kimi Code (includes main and subagent Wire files)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
+
 # Stats
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -93,6 +100,7 @@ Always ensure the index is current before searching.
 ```sh
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -108,16 +116,16 @@ Use `--no-summary` for routine local indexing. Drop it only when you want Codex-
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform claude "query" --project poly-retrace
 
 # Hybrid query (use proactively for mixed Chinese / code / log inputs)
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex --hybrid "Wi-Fi whd_bus_sdio_init_oob_intr EEXIST host-wake" --project poly-retrace
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --hybrid "录音确认超时 req_id" --project poly-retrace
 
-# Filtered
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform codex "pwsh" --type tool_use --tool shell_command --project poly-retrace
+# Filtered with Kimi's native tool name
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
 
 # Context window around a result id
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --context <id> --before 5 --after 5 --project poly-retrace
 
 # Full content of a single record
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --full <id>
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --full <id> --project poly-retrace
 ```
 
 When to reach for `--hybrid` first:
@@ -143,7 +151,7 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 |--------------|-----------------------------------------------------------------|
 | `--type`     | `session_meta`, `turn_context`, `user`, `assistant`, `tool_use`, `tool_result` |
 | `--role`     | `user`, `assistant`, `tool`                                     |
-| `--tool`     | `shell_command`, `apply_patch`, `read_mcp_resource`, `Read`, `Edit` |
+| `--tool`     | Platform-native names: `shell_command`, `apply_patch`, `Bash`, `Read`, `Skill` |
 | `--project`  | Project name or encoded-path fragment                           |
 | `--session`  | Session UUID                                                    |
 | `--since`    | ISO start date                                                  |
@@ -153,8 +161,11 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --session-id <uuid> --json
-& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --list
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --list --project poly-retrace --json
 ```
+
+Kimi locate results put the main Wire file first and include all subagent Wire files.
 
 ## Analyze
 
@@ -171,6 +182,7 @@ Single-session history extraction with strong prompt constraints. Emits TOON by 
 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -186,14 +198,16 @@ Reconstruct file versions from a session when edits were not committed to git. T
 
 ## Skill entry point
 
-`skills/retrace/SKILL.md` is the Claude Code skill that triggers on phrases like "find past conversations", "recall what was done", "search history", "recover file", and similar. The skill drives the same scripts described above.
+`skills/retrace/SKILL.md` is the standalone skill entry point used by supported agent clients. It triggers on phrases like "find past conversations", "recall what was done", "search history", "recover file", and similar, then drives the scripts described above.
 
 ## Troubleshooting
 
 | Issue                              | Fix                                                                                          |
 |------------------------------------|----------------------------------------------------------------------------------------------|
-| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude> --project <name> --no-summary`.       |
+| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|kimi> --project <name> --no-summary`.  |
 | No results                         | Verify `--project`, broaden the query, then retry with `--hybrid`.                           |
+| Kimi session is skipped            | Verify its `state.json` exists and contains `workDir`; `wd_` is never decoded.              |
+| Kimi `--tool` finds nothing        | Use the original Kimi name such as `Bash`, `Read`, or `Skill`.                              |
 | Query with `-` raises FTS errors   | Update to the current script; queries are auto-quoted when they contain non-word characters. |
 | Garbled console output             | Run under PowerShell 7. Scripts also force UTF-8 stdio.                                      |
 | Empty analyze / chronicle result   | Check the file path and make sure search returns rows first.                                 |

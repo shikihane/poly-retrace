@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 
 from platforms import claude as claude_platform
 from platforms import codex as codex_platform
+from platforms import kimi as kimi_platform
 from platforms.common import RetracePlatform
 
 
@@ -31,6 +32,8 @@ def get_platform(platform: str = "codex") -> RetracePlatform:
         return codex_platform.create_platform()
     if platform == "claude":
         return claude_platform.create_platform()
+    if platform == "kimi":
+        return kimi_platform.create_platform()
     raise ValueError(f"unknown platform: {platform}")
 
 
@@ -70,6 +73,11 @@ def encode_path(path: str) -> str:
 def decode_path(encoded: str, platform: str = "codex") -> str:
     """Best-effort decode for retrace project bucket names."""
     for session_file in iter_session_files(platform):
+        if platform == "kimi":
+            cwd = kimi_platform.read_session_state(session_file).get("workDir", "")
+            if cwd and encode_path(cwd) == encoded:
+                return cwd
+            continue
         try:
             with open(session_file, "r", encoding="utf-8") as f:
                 first = f.readline()
@@ -186,6 +194,22 @@ def session_file_agent_id(session_file: Path, max_records: int = 5) -> str:
 
 def find_session_files(session_id: str, platform: str = "codex") -> list[Path]:
     """Return all files that belong to a logical session id."""
+    if platform == "kimi":
+        requested = session_id.removeprefix("session_")
+        matches = [
+            session_file
+            for session_file in iter_session_files("kimi")
+            if kimi_platform.session_id_for_wire(session_file) == requested
+        ]
+        return sorted(
+            matches,
+            key=lambda path: (
+                0 if kimi_platform.agent_id_for_wire(path) == "main" else 1,
+                kimi_platform.agent_id_for_wire(path),
+                str(path),
+            ),
+        )
+
     matches: list[Path] = []
     requested_agent_id = session_id.removeprefix("agent-")
     for session_file in iter_session_files(platform):

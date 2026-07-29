@@ -26,11 +26,12 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from retrace_common import call_analysis_model, chunk_by_size, SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
-from retrace_paths import configure_utf8_stdio, find_session_files, get_platform
+from retrace_paths import configure_utf8_stdio, encode_path, find_session_files, get_platform
+from platforms import kimi as kimi_platform
 
 configure_utf8_stdio()
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def get_claude_dir() -> Path:
@@ -56,6 +57,13 @@ def find_project_dir(project_name: str, platform: str = "codex") -> Optional[Pat
 def find_session_file(session_uuid: str, project_name: str, platform: str = "codex") -> Optional[Path]:
     """根据 session UUID 查找 JSONL 文件"""
     for jsonl in find_session_files(session_uuid, platform):
+        if platform == "kimi":
+            work_dir = kimi_platform.read_session_state(jsonl).get("workDir", "")
+            if not project_name or (
+                work_dir and project_name.lower() in encode_path(work_dir).lower()
+            ):
+                return jsonl
+            continue
         if not project_name or project_name.lower() in str(jsonl).lower():
             return jsonl
 
@@ -74,6 +82,12 @@ def find_session_file(session_uuid: str, project_name: str, platform: str = "cod
 def read_session_file(path: Path) -> List[Dict]:
     """读取 JSONL 文件中的所有消息（完整内容）"""
     messages = []
+    is_kimi = kimi_platform.session_dir_for_wire(path) is not None
+    tool_names = {}
+    kimi_context = {
+        "session_id": kimi_platform.session_id_for_wire(path),
+        "agent_id": kimi_platform.agent_id_for_wire(path),
+    }
 
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -83,8 +97,20 @@ def read_session_file(path: Path) -> List[Dict]:
                     continue
                 try:
                     record = json.loads(line)
-                    # 提取消息内容
-                    msg = extract_message(record, line_num)
+                    if is_kimi:
+                        normalized = kimi_platform.normalize_wire_record(
+                            record,
+                            session_id=kimi_context["session_id"],
+                            agent_id=kimi_context["agent_id"],
+                            tool_names=tool_names,
+                        )
+                        if normalized and normalized.get("msg_type") == "tool_use":
+                            tool_call_id = normalized.get("tool_call_id", "")
+                            if tool_call_id:
+                                tool_names[tool_call_id] = normalized.get("tool_name", "")
+                        msg = _kimi_chronicle_message(normalized, line_num)
+                    else:
+                        msg = extract_message(record, line_num)
                     if msg:
                         messages.append(msg)
                 except json.JSONDecodeError:
@@ -94,6 +120,35 @@ def read_session_file(path: Path) -> List[Dict]:
         return []
 
     return messages
+
+
+def _kimi_chronicle_message(normalized: Optional[Dict], line_num: int) -> Optional[Dict]:
+    if not normalized:
+        return None
+    msg_type = normalized.get("msg_type", "")
+    content = normalized.get("search_text", "")
+    tool_name = normalized.get("tool_name", "")
+    if msg_type == "tool_use":
+        content = f"---TOOLS---\n@{tool_name} {content}"
+    message = {
+        "line": line_num,
+        "timestamp": normalized.get("timestamp", ""),
+        "type": msg_type,
+        "role": normalized.get("role", ""),
+        "content": content[:10000],
+        "agent": normalized.get("agent_id", ""),
+    }
+    if tool_name:
+        message["tool"] = tool_name
+    return message
+
+
+def read_session_files(paths: List[Path]) -> List[Dict]:
+    """Read and chronologically merge records from all agents in a session."""
+    messages = []
+    for path in paths:
+        messages.extend(read_session_file(path))
+    return sorted(messages, key=lambda message: message.get("timestamp", ""))
 
 
 def _extract_code_location(text: str) -> str:
@@ -580,7 +635,7 @@ def main():
     group.add_argument("--session", help="Session UUID")
     group.add_argument("--file", help="JSONL 文件路径")
     parser.add_argument("--project", help="项目名（--session 时必须）")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
                         help="会话平台")
     parser.add_argument("--output", "-o", required=True, help="输出文件路径（必选）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
@@ -590,6 +645,7 @@ def main():
     # 确定文件路径
     if args.file:
         session_file = Path(args.file)
+        session_files = [session_file]
         if not session_file.exists():
             print(f"❌ 文件不存在: {args.file}", file=sys.stderr)
             sys.exit(1)
@@ -601,12 +657,17 @@ def main():
         if not session_file:
             print(f"❌ 找不到会话: {args.session} (项目: {args.project})", file=sys.stderr)
             sys.exit(1)
+        session_files = (
+            find_session_files(args.session, "kimi")
+            if args.platform == "kimi"
+            else [session_file]
+        )
 
     print(f"📜 Chronicle: 提取会话历史", file=sys.stderr)
     print(f"   文件: {session_file.name}", file=sys.stderr)
 
     # 读取会话消息
-    messages = read_session_file(session_file)
+    messages = read_session_files(session_files)
 
     if not messages:
         print("❌ 无消息", file=sys.stderr)

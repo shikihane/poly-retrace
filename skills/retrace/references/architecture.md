@@ -2,118 +2,63 @@
 
 ## Overview
 
-Retrace v2.0 provides full-text search and analysis capabilities for Claude Code conversation history using SQLite FTS5.
+Retrace indexes Codex, Claude Code, and Kimi Code session history into separate
+per-platform, per-project SQLite databases. Search uses FTS5 with BM25 ranking and a
+selective trigram index for mixed Chinese, code, path, and log queries.
 
-## Data Storage
+## Platform Storage
 
-### Session Files
+| Platform | Source sessions | Project index |
+|----------|-----------------|---------------|
+| Codex | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/*.jsonl` | `~/.codex/projects/<encoded-cwd>/retrace-index.db` |
+| Claude Code | `~/.claude/projects/<encoded-cwd>/**/*.jsonl` | `~/.claude/projects/<encoded-cwd>/retrace-index.db` |
+| Kimi Code | `~/.kimi-code/sessions/*/session_*/agents/*/wire.jsonl` | `~/.kimi-code/projects/<encoded-cwd>/retrace-index.db` |
 
-Location: `~/.claude/projects/<encoded-path>/`
+`CODEX_HOME`, `CLAUDE_HOME`, and `KIMI_CODE_HOME` override the corresponding defaults.
+Indexes from different platforms must not share a project directory.
 
-Session files are named by UUID: `<uuid>.jsonl`
+Kimi's project bucket is derived only from `state.json.workDir`. Retrace does not parse
+the generated `wd_` directory name. See
+[ADR 001](./adr-001-kimi-project-attribution.md).
 
-Claude Code subagent sessions are stored under the parent session directory:
-`~/.claude/projects/<encoded-path>/<uuid>/subagents/agent-<id>.jsonl`
+## Platform Boundary
 
-Each session file contains Claude Code conversation history with tool usage, file modifications, and AI responses.
+- `platforms/common.py` defines the shared platform data model.
+- `platforms/codex.py` and `platforms/claude.py` own their session traversal.
+- `platforms/kimi.py` owns Kimi session traversal, state lookup, Wire normalization,
+  session IDs, agent IDs, and epoch-millisecond timestamps.
+- `retrace_paths.py` is the compatibility facade used by runtime scripts.
 
-### Index Database
+The default platform is Codex. Index, search, locate, and chronicle accept Kimi. Analyze
+still shells out through `codex exec` and has no Kimi-native backend.
 
-Location: `~/.claude/projects/<encoded-path>/retrace-index.db`
+## Unified Message Model
 
-Each project has its own dedicated SQLite database containing:
-- **Sessions table**: Metadata and summaries
-- **FTS5 virtual table**: Full-text search index with BM25 ranking
-- **Messages table**: Indexed message content
+The `messages` table stores source offsets plus normalized fields: session and agent IDs,
+timestamp, message type, role, native tool name, list preview, and longer search text.
+The supported types are `session_meta`, `turn_context`, `user`, `assistant`, `tool_use`,
+and `tool_result`.
 
-### Path Encoding
+Kimi Wire mapping is deliberately selective:
 
-Directory paths are URL-encoded for filesystem safety:
-
-| Original Path | Encoded |
-|---------------|---------|
-| `C:\Projects\myapp` | `C-Projects-myapp` |
-| `/home/user/project` | `home-user-project` |
-
-## Database Schema
-
-### Sessions Table
-
-```sql
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    project TEXT,
-    created_at TEXT,
-    summary TEXT
-);
-```
-
-### FTS5 Index
-
-```sql
-CREATE VIRTUAL TABLE messages_fts USING fts5(
-    session_id,
-    role,
-    type,
-    content,
-    tool_name,
-    tokenize='porter'
-);
-```
-
-## Session Lifecycle
-
-- **Creation**: New sessions created when Claude Code starts
-- **Indexing**: Sessions indexed automatically on first search
-- **Retention**: Sessions auto-delete after 30 days (configurable)
+- `context.append_message` with `role=user` becomes `user`.
+- `content.part` with `part.type=text` becomes `assistant`.
+- `tool.call` and `tool.result` become tool messages and retain Kimi's native tool name.
+- thinking, `turn.prompt`, usage, config, and other protocol events are skipped.
+- `state.json` supplies one synthetic `session_meta`; Kimi has no `turn_context` row.
 
 ## Supported Operations
 
 | Operation | Tool | Description |
 |-----------|------|-------------|
-| Index | `retrace-index.py` | Build/update FTS5 index |
-| Search | `retrace-search.py` | Query with filters |
-| Analyze | `retrace-analyze.py` | AI-powered analysis |
-| Chronicle | `retrace-chronicle.py` | Extract session events |
-| Recover | `retrace-recover.py` | Restore file versions |
+| Index | `retrace-index.py` | Build or incrementally refresh project indexes |
+| Search | `retrace-search.py` | FTS/hybrid search, filters, context, and full records |
+| Locate | `retrace-locate.py` | Find main and subagent source files |
+| Analyze | `retrace-analyze.py` | AI analysis through `codex exec` |
+| Chronicle | `retrace-chronicle.py` | Extract a time-ordered single-session history |
+| Recover | `retrace-recover.py` | Restore file versions from supported histories |
 
 ## Token Budget Control
 
-When processing large result sets, use layered output:
-
-1. **stats** (~50 tokens): Quick overview, counts
-2. **list** (~500 tokens): Browse results, IDs and timestamps
-3. **detail** (~2000 tokens): Examine matches, previews
-4. **full** (variable): Deep inspection, complete content
-
-## Filter Reference
-
-| Filter | Description |
-|--------|-------------|
-| `--type` | Message type: `tool_result`, `user`, `assistant` |
-| `--role` | Speaker: `user`, `assistant` |
-| `--tool` | Tool name: `Bash`, `Edit`, `Read`, `Write` |
-| `--project` | Project name (partial match) |
-| `--session` | Filter by session UUID |
-| `--since` | Start date (ISO 8601) |
-| `--until` | End date (ISO 8601) |
-
-## BM25 Ranking
-
-FTS5 uses BM25 for relevance ranking:
-
-- Higher BM25 scores indicate better matches
-- Scores are calculated based on term frequency and inverse document frequency
-- Use `--level detail` to see BM25 scores for results
-
-## Auto-Chunking
-
-For large data processing (>100KB):
-
-1. Split data into ~100KB chunks
-2. Process chunks in parallel (max 20 concurrent)
-3. Aggregate results
-
-Typical latency:
-- Single chunk (<100KB): ~5-7 seconds
-- Multiple chunks: ~15-22 seconds per chunk
+Use layered output: `stats` for counts, `list` for previews, `detail` for selected rows,
+then `full` or `context` only for the relevant message IDs.
