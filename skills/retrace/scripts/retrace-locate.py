@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 retrace-locate.py - 定位 Claude Code 会话文件
-版本: 1.2.0
+版本: 1.3.0
 
 功能：
 - 定位当前会话的 JSONL 文件
@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 
 from retrace_paths import (
+    SUPPORTED_PLATFORMS,
     configure_utf8_stdio,
     decode_path,
     encode_path,
@@ -36,11 +37,13 @@ from retrace_paths import (
     iter_session_files,
     read_first_json_record,
 )
+from platforms import grok as grok_platform
 from platforms import kimi as kimi_platform
+from platforms import omp as omp_platform
 
 configure_utf8_stdio()
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 
 def get_claude_dir() -> Path:
@@ -107,6 +110,10 @@ def get_session_cwd(session_file: Path, platform: str = "codex") -> str:
     """Return the cwd recorded by a session file when available."""
     if platform == "kimi":
         return kimi_platform.read_session_state(session_file).get("workDir", "")
+    if platform == "omp":
+        return omp_platform.project_cwd(session_file)
+    if platform == "grok":
+        return grok_platform.project_cwd(session_file)
     if platform == "claude":
         first_record = read_first_json_record(session_file)
         return first_record.get("cwd", "")
@@ -146,18 +153,35 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
     # 方法 1: 指定了 session_id
     if session_id:
         for retrace_platform in get_platforms(platform):
+            omp_groups = None
+            if retrace_platform.name == "omp":
+                omp_groups = omp_platform.matching_session_groups(
+                    session_id, iter_session_files("omp")
+                )
+                if len(omp_groups) > 1:
+                    return {
+                        "error": (
+                            f"OMP 会话 ID 前缀不唯一: {session_id} "
+                            f"({len(omp_groups)} matches)"
+                        )
+                    }
             platform_files = find_session_files(session_id, retrace_platform.name)
             if platform_files:
                 platform_file = platform_files[0]
                 cwd = get_session_cwd(platform_file, retrace_platform.name)
                 if cwd:
                     project_name = encode_path(cwd)
-                elif retrace_platform.name == "kimi":
+                elif retrace_platform.name in {"kimi", "omp", "grok"}:
                     project_name = None
                 else:
                     project_name = platform_file.relative_to(retrace_platform.projects_dir).parts[0]
+                logical_session_id = (
+                    omp_platform.session_id_for_file(platform_file)
+                    if retrace_platform.name == "omp"
+                    else session_id
+                )
                 result = _build_result(
-                    session_id,
+                    logical_session_id,
                     platform_file,
                     retrace_platform.projects_dir / project_name if project_name else None,
                     retrace_platform.name,
@@ -173,6 +197,34 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
                 if session_file:
                     return _build_result(session_id, session_file, project_dir, platform)
         return {"error": f"找不到会话: {session_id}"}
+
+    if platform == "omp":
+        requested_cwd = cwd or os.getcwd()
+        encoded_cwd = encode_path(requested_cwd)
+        matches = [
+            session_file
+            for session_file in iter_session_files("omp")
+            if omp_platform.is_root_session_file(session_file)
+            if encode_path(get_session_cwd(session_file, "omp")).casefold()
+            == encoded_cwd.casefold()
+        ]
+        if matches:
+            session_file = max(
+                matches,
+                key=lambda path: max(
+                    item.stat().st_mtime
+                    for item in omp_platform.session_family_files(path)
+                ),
+            )
+            session_id = omp_platform.session_id_for_file(session_file)
+            session_files = find_session_files(session_id, "omp")
+            return _build_result(
+                session_id,
+                session_file,
+                projects_dir / encoded_cwd,
+                "omp",
+                session_files,
+            )
 
     if not projects_dir.exists():
         return {"error": f"{platform} projects 目录不存在: {projects_dir}"}
@@ -270,6 +322,13 @@ def list_projects(platform: str = "codex") -> List[Dict]:
         projects_dir.mkdir(parents=True, exist_ok=True)
 
         for session_file in iter_session_files(retrace_platform.name):
+            if (
+                retrace_platform.name == "omp"
+                and not omp_platform.is_root_session_file(session_file)
+            ):
+                # OMP artifacts remain independently indexed by their own cwd,
+                # but the locate/list UI mirrors OMP's root-session picker.
+                continue
             cwd = get_session_cwd(session_file, retrace_platform.name)
             if retrace_platform.name == "claude":
                 try:
@@ -297,17 +356,29 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                 "index_size": 0,
                 "_session_ids": set(),
             })
-            stat = session_file.stat()
-            logical_session_id = (
-                kimi_platform.session_id_for_wire(session_file)
-                if retrace_platform.name == "kimi"
-                else session_file.stem
+            display_files = (
+                omp_platform.session_family_files(session_file)
+                if retrace_platform.name == "omp"
+                else [session_file]
             )
-            if logical_session_id not in entry["_session_ids"]:
+            if retrace_platform.name == "kimi":
+                logical_session_id = kimi_platform.session_id_for_wire(session_file)
+            elif retrace_platform.name == "grok":
+                logical_session_id = grok_platform.session_id_for_file(session_file)
+            elif retrace_platform.name == "omp":
+                logical_session_id = (
+                    omp_platform.session_id_for_file(session_file)
+                    if omp_platform.is_root_session_file(session_file)
+                    else ""
+                )
+            else:
+                logical_session_id = session_file.stem
+            if logical_session_id and logical_session_id not in entry["_session_ids"]:
                 entry["_session_ids"].add(logical_session_id)
                 entry["session_count"] += 1
-            entry["total_size"] += stat.st_size
-            modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
+            entry["total_size"] += sum(path.stat().st_size for path in display_files)
+            latest_mtime = max(path.stat().st_mtime for path in display_files)
+            modified = datetime.fromtimestamp(latest_mtime).isoformat()
             if not entry["latest_modified"] or modified > entry["latest_modified"]:
                 entry["latest_modified"] = modified
 
@@ -315,6 +386,11 @@ def list_projects(platform: str = "codex") -> List[Dict]:
             if pd.is_dir():
                 db_path = get_index_db_path(pd)
                 key = (retrace_platform.name, pd.name)
+                if retrace_platform.name == "omp" and key not in discovered:
+                    # A child running in an isolated worktree has its own
+                    # searchable DB bucket, but it is not an interactive/root
+                    # session and therefore stays out of the locate picker.
+                    continue
                 item = discovered.pop(key, {
                     "name": pd.name,
                     "path": decode_path(pd.name, retrace_platform.name),
@@ -375,6 +451,64 @@ def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
             })
         return sorted(sessions, key=lambda item: item["modified"], reverse=True)
 
+    if platform == "grok":
+        sessions = []
+        summaries_by_bucket = {}
+        for session_file in iter_session_files("grok"):
+            cwd = get_session_cwd(session_file, "grok")
+            if not cwd:
+                continue
+            bucket = encode_path(cwd)
+            if project_name.lower() not in bucket.lower():
+                continue
+            session_id = grok_platform.session_id_for_file(session_file)
+            project_dir = projects_dir / bucket
+            summaries = summaries_by_bucket.setdefault(
+                bucket, get_session_summaries(project_dir)
+            )
+            info = summaries.get(session_id, {})
+            sessions.append({
+                "session_id": session_id,
+                "file": str(session_file),
+                "files": [str(session_file)],
+                "size": session_file.stat().st_size,
+                "modified": datetime.fromtimestamp(session_file.stat().st_mtime).isoformat(),
+                "message_count": info.get("message_count"),
+                "summary": info.get("summary"),
+            })
+        return sorted(sessions, key=lambda item: item["modified"], reverse=True)
+
+    if platform == "omp":
+        sessions = []
+        summaries_by_bucket = {}
+        for session_file in iter_session_files("omp"):
+            if not omp_platform.is_root_session_file(session_file):
+                continue
+            cwd = get_session_cwd(session_file, "omp")
+            if not cwd:
+                continue
+            bucket = encode_path(cwd)
+            if project_name.lower() not in bucket.lower():
+                continue
+            session_id = omp_platform.session_id_for_file(session_file)
+            project_dir = projects_dir / bucket
+            summaries = summaries_by_bucket.setdefault(
+                bucket, get_session_summaries(project_dir)
+            )
+            info = summaries.get(session_id, {})
+            files = find_session_files(session_id, "omp")
+            latest = max(path.stat().st_mtime for path in files)
+            sessions.append({
+                "session_id": session_id,
+                "file": str(session_file),
+                "files": [str(path) for path in files],
+                "size": sum(path.stat().st_size for path in files),
+                "modified": datetime.fromtimestamp(latest).isoformat(),
+                "message_count": info.get("message_count"),
+                "summary": info.get("summary"),
+            })
+        return sorted(sessions, key=lambda item: item["modified"], reverse=True)
+
     # 支持模糊匹配项目名
     if not projects_dir.exists():
         return []
@@ -412,7 +546,7 @@ def main():
     parser.add_argument("--session-id", help="指定会话 ID")
     parser.add_argument("--list", action="store_true", help="列出项目或会话")
     parser.add_argument("--project", help="指定项目名")
-    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="codex",
                         help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")

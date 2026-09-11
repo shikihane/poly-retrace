@@ -14,8 +14,13 @@ from typing import Iterable, Optional
 
 from platforms import claude as claude_platform
 from platforms import codex as codex_platform
+from platforms import grok as grok_platform
 from platforms import kimi as kimi_platform
+from platforms import omp as omp_platform
 from platforms.common import RetracePlatform
+
+
+SUPPORTED_PLATFORMS = ("codex", "claude", "kimi", "omp", "grok")
 
 
 def configure_utf8_stdio() -> None:
@@ -34,6 +39,10 @@ def get_platform(platform: str = "codex") -> RetracePlatform:
         return claude_platform.create_platform()
     if platform == "kimi":
         return kimi_platform.create_platform()
+    if platform == "omp":
+        return omp_platform.create_platform()
+    if platform == "grok":
+        return grok_platform.create_platform()
     raise ValueError(f"unknown platform: {platform}")
 
 
@@ -78,6 +87,16 @@ def decode_path(encoded: str, platform: str = "codex") -> str:
             if cwd and encode_path(cwd) == encoded:
                 return cwd
             continue
+        if platform == "omp":
+            cwd = omp_platform.project_cwd(session_file)
+            if cwd and encode_path(cwd) == encoded:
+                return cwd
+            continue
+        if platform == "grok":
+            cwd = grok_platform.project_cwd(session_file)
+            if cwd and encode_path(cwd) == encoded:
+                return cwd
+            continue
         try:
             with open(session_file, "r", encoding="utf-8") as f:
                 first = f.readline()
@@ -100,7 +119,7 @@ def decode_path(encoded: str, platform: str = "codex") -> str:
 
 
 def iter_session_files(platform: str = "codex") -> Iterable[Path]:
-    """Yield session JSONL files for one platform or both platforms."""
+    """Yield session JSONL files for one supported platform."""
     for retrace_platform in get_platforms(platform):
         yield from retrace_platform.iter_session_files()
 
@@ -206,6 +225,32 @@ def find_session_files(session_id: str, platform: str = "codex") -> list[Path]:
             key=lambda path: (
                 0 if kimi_platform.agent_id_for_wire(path) == "main" else 1,
                 kimi_platform.agent_id_for_wire(path),
+                str(path),
+            ),
+        )
+
+    if platform == "grok":
+        return sorted(
+            session_file
+            for session_file in iter_session_files("grok")
+            if grok_platform.session_id_for_file(session_file) == session_id
+        )
+
+    if platform == "omp":
+        all_files = list(iter_session_files("omp"))
+        groups = omp_platform.matching_session_groups(session_id, all_files)
+        anchors = {path for paths in groups.values() for path in paths}
+        matches = {
+            family_file
+            for anchor in anchors
+            for family_file in omp_platform.session_family_files(anchor)
+        }
+        return sorted(
+            matches,
+            key=lambda path: (
+                0 if path in anchors and omp_platform.is_root_session_file(path) else 1,
+                0 if path in anchors else 1,
+                len(path.parts),
                 str(path),
             ),
         )

@@ -36,3 +36,11 @@ Write-Host "=== Example 10: Combined Filters ==="
     --project polydev `
     --since 2025-01-01 `
     --limit 20
+
+Write-Host "=== Example 11: OMP Native Tool Filter ==="
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform omp "command" `
+    --type tool_use --tool bash --project poly-retrace
+
+Write-Host "=== Example 12: Grok Native Tool Filter ==="
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform grok "command" `
+    --type tool_use --tool run_terminal_command --project poly-retrace

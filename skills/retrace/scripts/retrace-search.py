@@ -32,7 +32,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
-from retrace_paths import configure_utf8_stdio, get_platform, get_platforms
+from retrace_paths import SUPPORTED_PLATFORMS, configure_utf8_stdio, get_platform, get_platforms
 
 configure_utf8_stdio()
 
@@ -572,7 +572,9 @@ def get_context(conn: sqlite3.Connection, msg_id: int,
     """获取消息的上下文"""
     cursor = conn.cursor()
 
-    # 获取目标消息的行号和文件
+    # 获取目标消息的行号和文件。OMP can expand one JSONL line into
+    # assistant text plus multiple tool calls, so the target identity is the
+    # message id rather than every row sharing the same physical line number.
     cursor.execute("""
         SELECT session_file, line_no FROM messages WHERE id = ?
     """, (msg_id,))
@@ -582,13 +584,16 @@ def get_context(conn: sqlite3.Connection, msg_id: int,
 
     session_file, target_line = row
 
-    # 获取上下文
-    cursor.execute("""
+    # Older Codex/Claude/Kimi indexes may be searched directly before the
+    # index command has upgraded them, so keep the ordering backward-compatible.
+    columns = {item[1] for item in cursor.execute("PRAGMA table_info(messages)")}
+    order_by = "line_no, part_index, id" if "part_index" in columns else "line_no, id"
+    cursor.execute(f"""
         SELECT id, line_no, timestamp, msg_type, role, tool_name,
                SUBSTR(content_preview, 1, 150) as preview
         FROM messages
         WHERE session_file = ? AND line_no BETWEEN ? AND ?
-        ORDER BY line_no
+        ORDER BY {order_by}
     """, (session_file, target_line - before, target_line + after))
 
     results = []
@@ -601,7 +606,7 @@ def get_context(conn: sqlite3.Connection, msg_id: int,
             "role": row[4],
             "tool": row[5],
             "preview": row[6],
-            "is_target": row[1] == target_line
+            "is_target": row[0] == msg_id
         })
 
     return results
@@ -736,7 +741,7 @@ def main():
     parser.add_argument("--role", help="角色过滤 (user/assistant)")
     parser.add_argument("--tool", help="工具名过滤")
     parser.add_argument("--project", help="项目名过滤")
-    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="codex",
                         help="会话平台")
     parser.add_argument("--session", dest="session_id", help="会话 ID 过滤")
     parser.add_argument("--list-sessions", action="store_true", help="列出所有会话")
@@ -778,7 +783,7 @@ def main():
                 db_platforms[path] = platform.name
         if not db_paths:
             print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto --platform codex|claude|kimi", file=sys.stderr)
+            print("   请先运行: python retrace-index.py --auto --platform codex|claude|kimi|omp|grok", file=sys.stderr)
             sys.exit(1)
 
     # 验证数据库存在

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 retrace-index.py - Claude Code 会话日志索引器
-版本: 2.2.0
+版本: 2.3.0
 
 功能：
 - 按项目建立独立索引
@@ -33,6 +33,7 @@ from typing import Optional, List, Dict
 
 from retrace_paths import (
     RetracePlatform,
+    SUPPORTED_PLATFORMS,
     configure_utf8_stdio,
     encode_path,
     find_platform_command,
@@ -40,10 +41,12 @@ from retrace_paths import (
     get_platforms,
 )
 from platforms import kimi as kimi_platform
+from platforms import grok as grok_platform
+from platforms import omp as omp_platform
 
 configure_utf8_stdio()
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 PREVIEW_LIMIT = 300
 SEARCH_TEXT_LIMIT = 8192
 TRIGRAM_TOOL_RESULT_LIMIT = 4096
@@ -124,6 +127,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             line_no INTEGER NOT NULL,
             byte_offset INTEGER NOT NULL,
             byte_length INTEGER NOT NULL,
+            part_index INTEGER NOT NULL DEFAULT 0,
             uuid TEXT,
             parent_uuid TEXT,
             session_id TEXT,
@@ -135,7 +139,7 @@ def create_index_db(db_path: str) -> sqlite3.Connection:
             content_preview TEXT,
             search_text TEXT,
             content_hash TEXT,
-            UNIQUE(session_file, byte_offset)
+            UNIQUE(session_file, byte_offset, part_index)
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -177,6 +181,82 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE messages SET search_text = content_preview WHERE search_text IS NULL")
     if "agent_id" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN agent_id TEXT DEFAULT ''")
+
+    legacy_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_legacy'"
+    ).fetchone()
+    if "part_index" not in columns or legacy_exists:
+        # A savepoint keeps the table rename/copy/drop sequence atomic.  It also
+        # lets a database left by the pre-2.3 migration (new empty `messages`
+        # plus populated `messages_legacy`) recover on its next open.
+        conn.execute("SAVEPOINT migrate_messages_part_index")
+        try:
+            if legacy_exists:
+                legacy_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(messages_legacy)")
+                }
+                if "part_index" in legacy_columns:
+                    raise sqlite3.DatabaseError(
+                        "cannot recover unexpected messages_legacy schema"
+                    )
+                conn.execute("DROP TABLE messages")
+                conn.execute("ALTER TABLE messages_legacy RENAME TO messages")
+
+            conn.execute("ALTER TABLE messages RENAME TO messages_legacy")
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_file TEXT NOT NULL,
+                    line_no INTEGER NOT NULL,
+                    byte_offset INTEGER NOT NULL,
+                    byte_length INTEGER NOT NULL,
+                    part_index INTEGER NOT NULL DEFAULT 0,
+                    uuid TEXT,
+                    parent_uuid TEXT,
+                    session_id TEXT,
+                    timestamp TEXT,
+                    msg_type TEXT,
+                    role TEXT,
+                    tool_name TEXT,
+                    agent_id TEXT DEFAULT '',
+                    content_preview TEXT,
+                    search_text TEXT,
+                    content_hash TEXT,
+                    UNIQUE(session_file, byte_offset, part_index)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO messages
+                (id, session_file, line_no, byte_offset, byte_length, part_index,
+                 uuid, parent_uuid, session_id, timestamp, msg_type, role,
+                 tool_name, agent_id, content_preview, search_text, content_hash)
+                SELECT id, session_file, line_no, byte_offset, byte_length, 0,
+                       uuid, parent_uuid, session_id, timestamp, msg_type, role,
+                       tool_name, agent_id, content_preview, search_text, content_hash
+                FROM messages_legacy
+                """
+            )
+            conn.execute("DROP TABLE messages_legacy")
+            for index_name, column in (
+                ("idx_timestamp", "timestamp"),
+                ("idx_type", "msg_type"),
+                ("idx_role", "role"),
+                ("idx_tool", "tool_name"),
+                ("idx_session", "session_id"),
+            ):
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} ON messages({column})"
+                )
+        except BaseException:
+            conn.execute("ROLLBACK TO SAVEPOINT migrate_messages_part_index")
+            conn.execute("RELEASE SAVEPOINT migrate_messages_part_index")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT migrate_messages_part_index")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
 
     fts_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")}
     if "search_text" not in fts_columns:
@@ -475,6 +555,7 @@ def insert_normalized_message(
     byte_offset: int,
     byte_length: int,
     normalized: dict,
+    part_index: int = 0,
 ) -> bool:
     """Insert one normalized record and its FTS rows."""
     content_preview = normalized.get("content_preview", "")
@@ -485,6 +566,7 @@ def insert_normalized_message(
         line_no,
         byte_offset,
         byte_length,
+        part_index,
         normalized.get("uuid", ""),
         normalized.get("parent_uuid", ""),
         normalized.get("session_id", ""),
@@ -501,10 +583,10 @@ def insert_normalized_message(
         cursor.execute(
             """
             INSERT OR IGNORE INTO messages
-            (session_file, line_no, byte_offset, byte_length,
+            (session_file, line_no, byte_offset, byte_length, part_index,
              uuid, parent_uuid, session_id, timestamp, msg_type, role,
              tool_name, agent_id, content_preview, search_text, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -538,6 +620,84 @@ def insert_normalized_message(
     return True
 
 
+def refresh_normalized_message(
+    conn: sqlite3.Connection,
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    normalized: dict,
+) -> bool:
+    """Refresh mutable normalized fields without changing source offsets."""
+    row = cursor.execute(
+        """
+        SELECT id, content_preview, search_text, uuid, parent_uuid, session_id,
+               timestamp, role, tool_name, agent_id
+        FROM messages
+        WHERE session_file = ? AND msg_type = ?
+        ORDER BY part_index, id
+        LIMIT 1
+        """,
+        (source_file, normalized.get("msg_type", "")),
+    ).fetchone()
+    if not row:
+        return False
+
+    content_preview = normalized.get("content_preview", "")
+    search_text = normalized.get("search_text", content_preview)
+    refreshed = (
+        content_preview,
+        search_text,
+        normalized.get("uuid", ""),
+        normalized.get("parent_uuid", ""),
+        normalized.get("session_id", ""),
+        normalized.get("timestamp", ""),
+        normalized.get("role", ""),
+        normalized.get("tool_name") or "",
+        normalized.get("agent_id", ""),
+    )
+    if refreshed == row[1:]:
+        return False
+
+    msg_id = row[0]
+    content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
+    cursor.execute(
+        """
+        UPDATE messages
+        SET content_preview = ?, search_text = ?, uuid = ?, parent_uuid = ?,
+            session_id = ?, timestamp = ?, role = ?, tool_name = ?, agent_id = ?,
+            content_hash = ?
+        WHERE id = ?
+        """,
+        (*refreshed, content_hash, msg_id),
+    )
+    cursor.execute("DELETE FROM messages_fts WHERE rowid = ?", (msg_id,))
+    cursor.execute(
+        """
+        INSERT INTO messages_fts (rowid, search_text, msg_type, role, tool_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            msg_id,
+            search_text,
+            normalized.get("msg_type", ""),
+            normalized.get("role", ""),
+            normalized.get("tool_name") or "",
+        ),
+    )
+    try:
+        cursor.execute("DELETE FROM messages_trigram_fts WHERE rowid = ?", (msg_id,))
+    except sqlite3.OperationalError:
+        pass
+    insert_trigram_if_selective(
+        conn,
+        msg_id,
+        search_text,
+        normalized.get("msg_type", ""),
+        normalized.get("role", ""),
+        normalized.get("tool_name") or "",
+    )
+    return True
+
+
 def remember_tool_name(normalized: Optional[dict], tool_names: dict) -> None:
     """Remember a Kimi tool call so a later result retains its native name."""
     if not normalized or normalized.get("msg_type") != "tool_use":
@@ -545,6 +705,170 @@ def remember_tool_name(normalized: Optional[dict], tool_names: dict) -> None:
     tool_call_id = normalized.get("tool_call_id", "")
     if tool_call_id:
         tool_names[tool_call_id] = normalized.get("tool_name", "")
+
+
+def normalize_records(
+    data: dict,
+    kimi_context: Optional[dict] = None,
+    omp_context: Optional[dict] = None,
+    grok_context: Optional[dict] = None,
+) -> list[dict]:
+    """Normalize a source entry, allowing platforms to expand one line."""
+    if omp_context is not None:
+        return omp_platform.normalize_record(data, omp_context)
+    if grok_context is not None:
+        normalized = grok_platform.normalize_record(
+            data,
+            session_id=grok_context.get("session_id", ""),
+            agent_id=grok_context.get("agent_id", ""),
+            tool_names=grok_context.get("tool_names"),
+        )
+        return [normalized] if normalized else []
+    normalized = normalize_record(data, kimi_context)
+    return [normalized] if normalized else []
+
+
+def _omp_stable_region(session_file: Path, indexed_offset: int) -> tuple[bool, int, int]:
+    """Describe bytes that must stay immutable for append-only OMP indexing."""
+    stable_start = 0
+    has_title_slot = False
+    try:
+        with open(session_file, "rb") as source:
+            first_line = source.readline()
+        first_record = json.loads(first_line.decode("utf-8"))
+        if isinstance(first_record, dict) and first_record.get("type") == "title":
+            has_title_slot = True
+            stable_start = len(first_line)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    return has_title_slot, stable_start, max(0, indexed_offset - stable_start)
+
+
+def _hash_file_region(session_file: Path, start: int, length: int) -> str:
+    digest = hashlib.sha256()
+    remaining = length
+    with open(session_file, "rb") as source:
+        source.seek(start)
+        while remaining > 0:
+            chunk = source.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    if remaining:
+        return ""
+    return digest.hexdigest()
+
+
+def _omp_source_fingerprint(session_file: Path, indexed_offset: int) -> dict:
+    has_title, stable_start, stable_length = _omp_stable_region(
+        session_file, indexed_offset
+    )
+    stat = session_file.stat()
+    return {
+        "has_title": has_title,
+        "stable_start": stable_start,
+        "stable_length": stable_length,
+        "stable_hash": _hash_file_region(session_file, stable_start, stable_length),
+        "indexed_offset": indexed_offset,
+        "file_size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _store_omp_fingerprint(
+    cursor: sqlite3.Cursor,
+    session_file: Path,
+    indexed_offset: int,
+) -> None:
+    cursor.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        (
+            f"fingerprint:{session_file}",
+            json.dumps(
+                _omp_source_fingerprint(session_file, indexed_offset),
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _refresh_omp_fingerprint_stat(
+    cursor: sqlite3.Cursor,
+    session_file: Path,
+    serialized_fingerprint: str,
+) -> None:
+    """Refresh file metadata after the stored stable hash was verified."""
+    fingerprint = json.loads(serialized_fingerprint)
+    stat = session_file.stat()
+    fingerprint["file_size"] = stat.st_size
+    fingerprint["mtime_ns"] = stat.st_mtime_ns
+    cursor.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        (
+            f"fingerprint:{session_file}",
+            json.dumps(fingerprint, separators=(",", ":"), sort_keys=True),
+        ),
+    )
+
+
+def _omp_is_append_only(
+    session_file: Path,
+    start_offset: int,
+    serialized_fingerprint: Optional[str],
+) -> bool:
+    if not serialized_fingerprint:
+        return False
+    try:
+        previous = json.loads(serialized_fingerprint)
+        if int(previous.get("indexed_offset", -1)) != start_offset:
+            return False
+        stat = session_file.stat()
+        if stat.st_size < start_offset:
+            return False
+        has_title, stable_start, stable_length = _omp_stable_region(
+            session_file, start_offset
+        )
+        if (
+            bool(previous.get("has_title")) != has_title
+            or int(previous.get("stable_start", -1)) != stable_start
+            or int(previous.get("stable_length", -1)) != stable_length
+        ):
+            return False
+        if (
+            stat.st_size == int(previous.get("file_size", -1))
+            and stat.st_mtime_ns == int(previous.get("mtime_ns", -1))
+        ):
+            return True
+        return _hash_file_region(session_file, stable_start, stable_length) == str(
+            previous.get("stable_hash", "")
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _drop_indexed_source(
+    conn: sqlite3.Connection,
+    cursor: sqlite3.Cursor,
+    session_file: str,
+) -> None:
+    """Remove one rewritten source and every derived search/index row."""
+    rows = cursor.execute(
+        "SELECT id, session_id FROM messages WHERE session_file = ?",
+        (session_file,),
+    ).fetchall()
+    for msg_id, _ in rows:
+        cursor.execute("DELETE FROM messages_fts WHERE rowid = ?", (msg_id,))
+        try:
+            cursor.execute("DELETE FROM messages_trigram_fts WHERE rowid = ?", (msg_id,))
+        except sqlite3.OperationalError:
+            pass
+    cursor.execute("DELETE FROM messages WHERE session_file = ?", (session_file,))
+    for session_id in {row[1] for row in rows if row[1]}:
+        cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+    cursor.execute("DELETE FROM meta WHERE key = ?", (f"offset:{session_file}",))
+    cursor.execute("DELETE FROM meta WHERE key = ?", (f"fingerprint:{session_file}",))
 
 
 def index_session_file(conn: sqlite3.Connection, session_file: str,
@@ -563,8 +887,12 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
     current_session_id = ""
     session_path = Path(session_file)
     is_kimi = platform_name == "kimi" or kimi_platform.session_dir_for_wire(session_path) is not None
+    is_omp = platform_name == "omp"
+    is_grok = platform_name == "grok" or grok_platform.session_dir_for_updates(session_path) is not None
     tool_names = {}
     kimi_context = None
+    omp_context = None
+    grok_context = None
     if is_kimi:
         current_session_id = kimi_platform.session_id_for_wire(session_path)
         kimi_context = {
@@ -572,15 +900,64 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
             "agent_id": kimi_platform.agent_id_for_wire(session_path),
             "tool_names": tool_names,
         }
+    if is_omp:
+        omp_context = {
+            "session_id": "",
+            "agent_id": omp_platform.agent_id_for_file(session_path),
+        }
+    if is_grok:
+        current_session_id = grok_platform.session_id_for_file(session_path)
+        grok_context = {
+            "session_id": current_session_id,
+            "agent_id": "main",
+            "tool_names": tool_names,
+        }
 
     file_size = os.path.getsize(session_file)
+    omp_fingerprint_value = ""
+    if is_omp and start_offset > 0:
+        fingerprint_row = cursor.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (f"fingerprint:{session_file}",),
+        ).fetchone()
+        omp_fingerprint_value = fingerprint_row[0] if fingerprint_row else ""
+        if not _omp_is_append_only(
+            session_path,
+            start_offset,
+            omp_fingerprint_value,
+        ):
+            _drop_indexed_source(conn, cursor, session_file)
+            start_offset = 0
+            omp_context = {
+                "session_id": "",
+                "agent_id": omp_platform.agent_id_for_file(session_path),
+            }
+
     should_add_kimi_meta = (
         is_kimi
         and start_offset == 0
         and kimi_context["agent_id"] == "main"
         and kimi_platform.normalize_session_meta(session_path) is not None
     )
-    if start_offset >= file_size and not should_add_kimi_meta:
+    should_add_grok_meta = (
+        is_grok
+        and start_offset == 0
+        and grok_platform.normalize_session_meta(session_path) is not None
+    )
+    if is_omp and start_offset > 0:
+        session_meta = omp_platform.normalize_session_meta(session_path)
+        if session_meta and refresh_normalized_message(
+            conn, cursor, session_file, session_meta
+        ):
+            conn.commit()
+    if start_offset >= file_size and not should_add_kimi_meta and not should_add_grok_meta:
+        if is_omp:
+            # A title-slot-only update changes mtime but not the stable region.
+            # Remember the new stat values so future no-op scans stay O(1).
+            _refresh_omp_fingerprint_stat(
+                cursor, session_path, omp_fingerprint_value
+            )
+            conn.commit()
         return 0, set()
 
     if should_add_kimi_meta:
@@ -599,6 +976,22 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
         if current_session_id:
             session_ids.add(current_session_id)
 
+    if should_add_grok_meta:
+        summary_path = grok_platform.session_dir_for_updates(session_path) / "summary.json"
+        session_meta = grok_platform.normalize_session_meta(session_path)
+        if insert_normalized_message(
+            conn,
+            cursor,
+            str(summary_path),
+            1,
+            0,
+            summary_path.stat().st_size,
+            session_meta,
+        ):
+            indexed_count += 1
+        if current_session_id:
+            session_ids.add(current_session_id)
+
     if start_offset > 0:
         with open(session_file, 'rb') as f:
             while f.tell() < start_offset:
@@ -606,10 +999,10 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 line_no += 1
                 try:
                     record = json.loads(line.decode("utf-8"))
-                    normalized = normalize_record(record, kimi_context)
-                    if normalized and record.get("type") == "session_meta":
-                        current_session_id = normalized.get("session_id", "")
-                    remember_tool_name(normalized, tool_names)
+                    for normalized in normalize_records(record, kimi_context, omp_context, grok_context):
+                        if normalized.get("msg_type") == "session_meta":
+                            current_session_id = normalized.get("session_id", "")
+                        remember_tool_name(normalized, tool_names)
                 except Exception:
                     pass
 
@@ -627,27 +1020,35 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
                 byte_offset += line_length
                 continue
 
-            normalized = normalize_record(data, kimi_context)
-            if not normalized:
+            normalized_items = normalize_records(data, kimi_context, omp_context, grok_context)
+            if not normalized_items:
                 byte_offset += line_length
                 continue
 
-            remember_tool_name(normalized, tool_names)
+            for part_index, normalized in enumerate(normalized_items):
+                remember_tool_name(normalized, tool_names)
 
-            if data.get("type") == "session_meta":
-                current_session_id = normalized.get("session_id", "")
-            elif current_session_id and not normalized.get("session_id"):
-                normalized["session_id"] = current_session_id
+                if normalized.get("msg_type") == "session_meta":
+                    current_session_id = normalized.get("session_id", "")
+                elif current_session_id and not normalized.get("session_id"):
+                    normalized["session_id"] = current_session_id
 
-            session_id = normalized.get("session_id", "")
+                session_id = normalized.get("session_id", "")
 
-            if session_id:
-                session_ids.add(session_id)
+                if session_id:
+                    session_ids.add(session_id)
 
-            if insert_normalized_message(
-                conn, cursor, session_file, line_no, byte_offset, line_length, normalized
-            ):
-                indexed_count += 1
+                if insert_normalized_message(
+                    conn,
+                    cursor,
+                    session_file,
+                    line_no,
+                    byte_offset,
+                    line_length,
+                    normalized,
+                    part_index,
+                ):
+                    indexed_count += 1
 
             byte_offset += line_length
 
@@ -655,6 +1056,8 @@ def index_session_file(conn: sqlite3.Connection, session_file: str,
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             (f"offset:{session_file}", str(byte_offset))
         )
+        if is_omp:
+            _store_omp_fingerprint(cursor, session_path, byte_offset)
 
     conn.commit()
     return indexed_count, session_ids
@@ -693,6 +1096,8 @@ def choose_canonical_session_file(session_id: str, current_file: str, candidate_
 
     def priority(path: str) -> tuple[int, str]:
         p = Path(path)
+        if omp_platform.is_session_file(p):
+            return (0 if omp_platform.is_root_session_file(p) else 2, path)
         if p.stem == session_id and "subagents" not in p.parts:
             return (0, path)
         if p.name == "wire.jsonl" and p.parent.name == "main" and p.parent.parent.name == "agents":
@@ -948,6 +1353,12 @@ def detect_session_project(session_file: Path, platform: RetracePlatform) -> Opt
     if platform.name == "kimi":
         work_dir = kimi_platform.read_session_state(session_file).get("workDir")
         return encode_path(work_dir) if work_dir else None
+    if platform.name == "omp":
+        cwd = omp_platform.project_cwd(session_file)
+        return encode_path(cwd) if cwd else None
+    if platform.name == "grok":
+        cwd = grok_platform.project_cwd(session_file)
+        return encode_path(cwd) if cwd else None
 
     try:
         with open(session_file, "r", encoding="utf-8") as f:
@@ -1121,7 +1532,7 @@ def main():
     parser = argparse.ArgumentParser(description="Claude Code 会话日志索引器 (按项目独立索引)")
     parser.add_argument("--auto", action="store_true", help="自动索引所有项目")
     parser.add_argument("--project", help="过滤项目名")
-    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="codex",
                         help="会话平台")
     parser.add_argument("--no-incremental", action="store_true", help="重建索引")
     parser.add_argument("--no-summary", action="store_true", help="不生成会话摘要")

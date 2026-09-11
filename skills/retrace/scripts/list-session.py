@@ -22,7 +22,7 @@ import argparse
 from pathlib import Path
 from typing import Optional, List
 
-from retrace_paths import configure_utf8_stdio, encode_path, get_platform
+from retrace_paths import SUPPORTED_PLATFORMS, configure_utf8_stdio, encode_path, get_platform
 
 configure_utf8_stdio()
 
@@ -243,7 +243,7 @@ def main():
     )
     parser.add_argument(
         "--platform",
-        choices=["codex", "claude"],
+        choices=SUPPORTED_PLATFORMS,
         required=True,
         help="会话平台"
     )

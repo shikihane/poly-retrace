@@ -15,3 +15,9 @@ echo "=== Example 3: Hybrid Query ==="
 
 echo "=== Example 4: Filtered Tool Query ==="
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-search.py" --platform codex "shell" --type tool_use --tool shell_command --project poly-retrace
+
+echo "=== Example 5: OMP Native Tool Query ==="
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-search.py" --platform omp "command" --type tool_use --tool bash --project poly-retrace
+
+echo "=== Example 6: Grok Native Tool Query ==="
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-search.py" --platform grok "command" --type tool_use --tool run_terminal_command --project poly-retrace

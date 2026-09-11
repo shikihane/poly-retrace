@@ -38,3 +38,17 @@ Write-Host "=== Example 8: Save to File ==="
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
     --session 550e8400-e29b-41d4-a716-446655440000 `
     --project polydev | Set-Content .\session_chronicle.txt
+
+Write-Host "=== Example 9: OMP Chronicle ==="
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
+    --platform omp `
+    --session "<uuid-or-prefix>" `
+    --project poly-retrace `
+    --output .\omp-chronicle.toon
+
+Write-Host "=== Example 10: Grok Chronicle ==="
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" `
+    --platform grok `
+    --session "<uuid>" `
+    --project poly-retrace `
+    --output .\grok-chronicle.toon

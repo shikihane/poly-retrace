@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 retrace-chronicle.py - Claude Code 单会话历史回溯
-版本: 2.0.0
+版本: 2.2.0
 
 功能：
 - 从单个会话 JSONL 文件提取关键信息
@@ -26,12 +26,21 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from retrace_common import call_analysis_model, chunk_by_size, SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
-from retrace_paths import configure_utf8_stdio, encode_path, find_session_files, get_platform
+from retrace_paths import (
+    SUPPORTED_PLATFORMS,
+    configure_utf8_stdio,
+    encode_path,
+    find_session_files,
+    get_platform,
+    iter_session_files,
+)
+from platforms import grok as grok_platform
 from platforms import kimi as kimi_platform
+from platforms import omp as omp_platform
 
 configure_utf8_stdio()
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 
 def get_claude_dir() -> Path:
@@ -56,11 +65,42 @@ def find_project_dir(project_name: str, platform: str = "codex") -> Optional[Pat
 
 def find_session_file(session_uuid: str, project_name: str, platform: str = "codex") -> Optional[Path]:
     """根据 session UUID 查找 JSONL 文件"""
+    if platform == "omp":
+        groups = omp_platform.matching_session_groups(
+            session_uuid, iter_session_files("omp")
+        )
+        if len(groups) != 1:
+            return None
+        # Validate the requested physical session against the project before
+        # expanding its root/task family. Otherwise a root UUID could pass a
+        # child worktree's project filter even though their header IDs differ.
+        anchors = next(iter(groups.values()))
+        for jsonl in sorted(
+            anchors,
+            key=lambda path: (
+                0 if omp_platform.is_root_session_file(path) else 1,
+                str(path),
+            ),
+        ):
+            cwd = omp_platform.project_cwd(jsonl)
+            if not project_name or (
+                cwd and project_name.lower() in encode_path(cwd).lower()
+            ):
+                return jsonl
+        return None
+
     for jsonl in find_session_files(session_uuid, platform):
         if platform == "kimi":
             work_dir = kimi_platform.read_session_state(jsonl).get("workDir", "")
             if not project_name or (
                 work_dir and project_name.lower() in encode_path(work_dir).lower()
+            ):
+                return jsonl
+            continue
+        if platform == "grok":
+            cwd = grok_platform.project_cwd(jsonl)
+            if not project_name or (
+                cwd and project_name.lower() in encode_path(cwd).lower()
             ):
                 return jsonl
             continue
@@ -83,10 +123,20 @@ def read_session_file(path: Path) -> List[Dict]:
     """读取 JSONL 文件中的所有消息（完整内容）"""
     messages = []
     is_kimi = kimi_platform.session_dir_for_wire(path) is not None
+    is_omp = not is_kimi and omp_platform.is_session_file(path)
+    is_grok = not is_kimi and not is_omp and grok_platform.session_dir_for_updates(path) is not None
     tool_names = {}
     kimi_context = {
         "session_id": kimi_platform.session_id_for_wire(path),
         "agent_id": kimi_platform.agent_id_for_wire(path),
+    }
+    omp_context = {
+        "session_id": "",
+        "agent_id": omp_platform.agent_id_for_file(path),
+    }
+    grok_context = {
+        "session_id": grok_platform.session_id_for_file(path),
+        "agent_id": "main",
     }
 
     try:
@@ -97,6 +147,7 @@ def read_session_file(path: Path) -> List[Dict]:
                     continue
                 try:
                     record = json.loads(line)
+                    extracted = []
                     if is_kimi:
                         normalized = kimi_platform.normalize_wire_record(
                             record,
@@ -108,11 +159,33 @@ def read_session_file(path: Path) -> List[Dict]:
                             tool_call_id = normalized.get("tool_call_id", "")
                             if tool_call_id:
                                 tool_names[tool_call_id] = normalized.get("tool_name", "")
-                        msg = _kimi_chronicle_message(normalized, line_num)
+                        msg = _normalized_chronicle_message(normalized, line_num)
+                        if msg:
+                            extracted.append(msg)
+                    elif is_omp:
+                        for normalized in omp_platform.normalize_record(record, omp_context):
+                            msg = _normalized_chronicle_message(normalized, line_num)
+                            if msg:
+                                extracted.append(msg)
+                    elif is_grok:
+                        normalized = grok_platform.normalize_record(
+                            record,
+                            session_id=grok_context["session_id"],
+                            agent_id=grok_context["agent_id"],
+                            tool_names=tool_names,
+                        )
+                        if normalized and normalized.get("msg_type") == "tool_use":
+                            tool_call_id = normalized.get("tool_call_id", "")
+                            if tool_call_id:
+                                tool_names[tool_call_id] = normalized.get("tool_name", "")
+                        msg = _normalized_chronicle_message(normalized, line_num)
+                        if msg:
+                            extracted.append(msg)
                     else:
                         msg = extract_message(record, line_num)
-                    if msg:
-                        messages.append(msg)
+                        if msg:
+                            extracted.append(msg)
+                    messages.extend(extracted)
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
@@ -122,7 +195,7 @@ def read_session_file(path: Path) -> List[Dict]:
     return messages
 
 
-def _kimi_chronicle_message(normalized: Optional[Dict], line_num: int) -> Optional[Dict]:
+def _normalized_chronicle_message(normalized: Optional[Dict], line_num: int) -> Optional[Dict]:
     if not normalized:
         return None
     msg_type = normalized.get("msg_type", "")
@@ -141,6 +214,9 @@ def _kimi_chronicle_message(normalized: Optional[Dict], line_num: int) -> Option
     if tool_name:
         message["tool"] = tool_name
     return message
+
+
+_kimi_chronicle_message = _normalized_chronicle_message
 
 
 def read_session_files(paths: List[Path]) -> List[Dict]:
@@ -635,7 +711,7 @@ def main():
     group.add_argument("--session", help="Session UUID")
     group.add_argument("--file", help="JSONL 文件路径")
     parser.add_argument("--project", help="项目名（--session 时必须）")
-    parser.add_argument("--platform", choices=["codex", "claude", "kimi"], default="codex",
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="codex",
                         help="会话平台")
     parser.add_argument("--output", "-o", required=True, help="输出文件路径（必选）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
@@ -658,8 +734,8 @@ def main():
             print(f"❌ 找不到会话: {args.session} (项目: {args.project})", file=sys.stderr)
             sys.exit(1)
         session_files = (
-            find_session_files(args.session, "kimi")
-            if args.platform == "kimi"
+            find_session_files(args.session, args.platform)
+            if args.platform in {"kimi", "omp", "grok"}
             else [session_file]
         )
 

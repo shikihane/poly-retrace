@@ -1,12 +1,12 @@
 # poly-retrace
 
-Search and analyze Codex, Claude Code, and Kimi Code conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
+Search and analyze Codex, Claude Code, Kimi Code, Oh My Pi (OMP), and Grok CLI conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
 
 Chinese version: [README_CN.md](./README_CN.md).
 
 ## What it does
 
-- Indexes Codex and Claude Code session JSONL plus Kimi Wire files into per-project SQLite databases.
+- Indexes Codex, Claude Code, OMP, and Grok CLI session JSONL plus Kimi Wire files into per-project SQLite databases.
 - Full-text search with BM25 ranking, plus a hybrid trigram mode for Chinese, paths, hyphenated names, and pasted log fragments.
 - Layered search output (`stats` -> `list` -> `detail` -> `full`) to keep token budgets under control.
 - Single-session chronicle extraction to TOON / JSON for handoff or memory.
@@ -18,11 +18,17 @@ Chinese version: [README_CN.md](./README_CN.md).
 - Codex sessions: `%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`, plus `archived_sessions`; default home is `~/.codex`.
 - Claude Code sessions: `%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`; default home is `~/.claude`.
 - Kimi Code sessions: `%KIMI_CODE_HOME%\sessions\*\session_*\agents\*\wire.jsonl` / `$KIMI_CODE_HOME/sessions/*/session_*/agents/*/wire.jsonl`; default home is `~/.kimi-code`.
+- OMP sessions: `%PI_CODING_AGENT_SESSION_DIR%\**\*.jsonl` / `$PI_CODING_AGENT_SESSION_DIR/**/*.jsonl`, or `~/.omp/agent/sessions/**/*.jsonl` by default.
+- Grok CLI sessions: `%GROK_HOME%\sessions\<url-encoded-cwd>\<session-id>\updates.jsonl` / `$GROK_HOME/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl`; default home is `~/.grok`.
 - Indexes live under each platform home at `projects/<encoded-cwd>/retrace-index.db`.
 
-The default platform is `codex`. Pass `--platform claude` or `--platform kimi` for other platforms. `KIMI_CODE_HOME` overrides the Kimi home.
+The default platform is `codex`. Pass `--platform claude`, `--platform kimi`, `--platform omp`, or `--platform grok` for other platforms. `KIMI_CODE_HOME` overrides the Kimi home. `PI_CODING_AGENT_DIR` overrides the OMP agent home; `PI_CODING_AGENT_SESSION_DIR` overrides its session root. `OMP_PROFILE` (or legacy `PI_PROFILE`) selects `~/.omp/profiles/<name>/agent`. `GROK_HOME` is the only override for the Grok home.
 
 Kimi project attribution comes only from each session's `state.json.workDir`. A missing or invalid state file leaves the session unattributed; Retrace never guesses from the generated `wd_` directory name. See [ADR 001](./skills/retrace/references/adr-001-kimi-project-attribution.md).
+
+OMP project attribution comes only from each JSONL `session` header's `cwd`; Retrace does not decode OMP's session-directory name. Assistant `content[].type=toolCall` blocks and `role=toolResult` messages are indexed as separate tool events with native lowercase names such as `read`, `bash`, and `task`.
+
+Grok CLI project attribution comes only from each session's `summary.json` `info.cwd`. If the summary is missing or invalid, Retrace falls back to URL-decoding the percent-encoded group directory name, then to the `.cwd` file written for slugged long names; it never applies Codex-style `-` decoding to Grok's directory names. The append-only `updates.jsonl` ACP event stream is indexed; the sibling `chat_history.jsonl` is not. Tool events keep Grok's native names such as `run_terminal_command`. See [ADR 002](./skills/retrace/references/adr-002-grok-project-attribution.md).
 
 ### Path encoding
 
@@ -34,7 +40,7 @@ Unix paths are encoded by stripping the leading slash and replacing path separat
 
 `/home/user/example-project` -> `home-user-example-project`.
 
-Hyphens can appear in real path components, so decoding is best-effort unless Codex provides `session_meta.payload.cwd` or Kimi provides `state.json.workDir`.
+Hyphens can appear in real path components, so decoding is best-effort unless Codex provides `session_meta.payload.cwd`, Kimi provides `state.json.workDir`, or OMP provides its session-header `cwd`.
 
 ## Layout
 
@@ -48,7 +54,9 @@ poly-retrace/
 |   |   |-- common.py             # shared data model
 |   |   |-- codex.py              # Codex paths and parsing
 |   |   |-- claude.py             # Claude Code paths and parsing
+|   |   |-- grok.py               # Grok paths, summary, and updates.jsonl parsing
 |   |   |-- kimi.py               # Kimi paths, state, and Wire parsing
+|   |   |-- omp.py                # OMP paths, headers, and message/tool parsing
 |   |-- retrace-index.py          # build / refresh FTS index
 |   |-- retrace-search.py         # search (FTS or hybrid)
 |   |-- retrace-locate.py         # locate session files
@@ -93,6 +101,12 @@ Always ensure the index is current before searching.
 # Kimi Code (includes main and subagent Wire files)
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 
+# OMP
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
+
+# Grok CLI (indexes updates.jsonl ACP event streams)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
+
 # Stats
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -101,6 +115,8 @@ Always ensure the index is current before searching.
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -120,6 +136,12 @@ Use `--no-summary` for routine local indexing. Drop it only when you want Codex-
 
 # Filtered with Kimi's native tool name
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
+
+# Filtered with OMP's native lowercase tool name
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform omp "command" --type tool_use --tool bash --project poly-retrace
+
+# Filtered with Grok's native tool name
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform grok "command" --type tool_use --tool run_terminal_command --project poly-retrace
 
 # Context window around a result id
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --context <id> --before 5 --after 5 --project poly-retrace
@@ -151,7 +173,7 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 |--------------|-----------------------------------------------------------------|
 | `--type`     | `session_meta`, `turn_context`, `user`, `assistant`, `tool_use`, `tool_result` |
 | `--role`     | `user`, `assistant`, `tool`                                     |
-| `--tool`     | Platform-native names: `shell_command`, `apply_patch`, `Bash`, `Read`, `Skill` |
+| `--tool`     | Platform-native names: `shell_command`, `apply_patch`, `Bash`, `Read`, `Skill`, `bash`, `read`, `task`, `run_terminal_command` |
 | `--project`  | Project name or encoded-path fragment                           |
 | `--session`  | Session UUID                                                    |
 | `--since`    | ISO start date                                                  |
@@ -163,9 +185,15 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --list --project poly-retrace --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform omp --session-id <uuid-or-prefix> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform grok --session-id <uuid> --json
 ```
 
 Kimi locate results put the main Wire file first and include all subagent Wire files.
+
+OMP accepts full session IDs or unique prefixes and derives the project from the session header rather than the source directory name.
+
+Grok session IDs are the UUIDv7 session-directory names; locate returns the session's `updates.jsonl` and derives the project from `summary.json` `info.cwd`.
 
 ## Analyze
 
@@ -183,6 +211,8 @@ Single-session history extraction with strong prompt constraints. Emits TOON by 
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform omp --session <uuid-or-prefix> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform grok --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -204,10 +234,14 @@ Reconstruct file versions from a session when edits were not committed to git. T
 
 | Issue                              | Fix                                                                                          |
 |------------------------------------|----------------------------------------------------------------------------------------------|
-| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|kimi> --project <name> --no-summary`.  |
+| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|kimi|omp|grok> --project <name> --no-summary`. |
 | No results                         | Verify `--project`, broaden the query, then retry with `--hybrid`.                           |
 | Kimi session is skipped            | Verify its `state.json` exists and contains `workDir`; `wd_` is never decoded.              |
 | Kimi `--tool` finds nothing        | Use the original Kimi name such as `Bash`, `Read`, or `Skill`.                              |
+| OMP sessions are missing           | Check `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; expose custom `--session-dir` through the latter. |
+| OMP `--tool` finds nothing         | Use OMP's original lowercase name such as `bash`, `read`, or `task`.                        |
+| Grok session is skipped            | Verify its `summary.json` exists and contains `info.cwd`; URL-decoding the group directory name and the `.cwd` file are only fallbacks. |
+| Grok `--tool` finds nothing        | Use Grok's original tool name such as `run_terminal_command`.                              |
 | Query with `-` raises FTS errors   | Update to the current script; queries are auto-quoted when they contain non-word characters. |
 | Garbled console output             | Run under PowerShell 7. Scripts also force UTF-8 stdio.                                      |
 | Empty analyze / chronicle result   | Check the file path and make sure search returns rows first.                                 |

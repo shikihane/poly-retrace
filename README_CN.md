@@ -1,12 +1,12 @@
 # poly-retrace
 
-搜索和分析 Codex、Claude Code 与 Kimi Code 的会话历史，基于 SQLite FTS 全文索引、BM25 排序，以及可选的 AI 摘要能力。
+搜索和分析 Codex、Claude Code、Kimi Code、Oh My Pi（OMP）与 Grok CLI 的会话历史，基于 SQLite FTS 全文索引、BM25 排序，以及可选的 AI 摘要能力。
 
 English version: [README.md](./README.md).
 
 ## 功能
 
-- 为每个项目的 Codex / Claude Code 会话 JSONL 与 Kimi Wire 文件建立独立的 SQLite 索引。
+- 为每个项目的 Codex / Claude Code / OMP / Grok CLI 会话 JSONL 与 Kimi Wire 文件建立独立的 SQLite 索引。
 - 全文检索 + BM25 排序，额外提供 trigram 混合模式，用于中文、路径、连字符标识符和粘贴的日志片段。
 - 分层检索输出（`stats` -> `list` -> `detail` -> `full`），帮助控制 token 预算。
 - 单会话历史抽取（chronicle），输出 TOON / JSON，便于交接或存入记忆。
@@ -18,11 +18,17 @@ English version: [README.md](./README.md).
 - Codex 会话：`%CODEX_HOME%\sessions\**\*.jsonl` / `$CODEX_HOME/sessions/**/*.jsonl`，以及 `archived_sessions`；默认 home 是 `~/.codex`。
 - Claude Code 会话：`%CLAUDE_HOME%\projects\<encoded-cwd>\*.jsonl` / `$CLAUDE_HOME/projects/<encoded-cwd>/*.jsonl`；默认 home 是 `~/.claude`。
 - Kimi Code 会话：`%KIMI_CODE_HOME%\sessions\*\session_*\agents\*\wire.jsonl` / `$KIMI_CODE_HOME/sessions/*/session_*/agents/*/wire.jsonl`；默认 home 是 `~/.kimi-code`。
+- OMP 会话：`%PI_CODING_AGENT_SESSION_DIR%\**\*.jsonl` / `$PI_CODING_AGENT_SESSION_DIR/**/*.jsonl`；默认是 `~/.omp/agent/sessions/**/*.jsonl`。
+- Grok CLI 会话：`%GROK_HOME%\sessions\<url-encoded-cwd>\<session-id>\updates.jsonl` / `$GROK_HOME/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl`；默认 home 是 `~/.grok`。
 - 索引数据库位于对应平台 home 下的 `projects/<encoded-cwd>/retrace-index.db`。
 
-默认平台是 `codex`；使用其他平台时显式传 `--platform claude` 或 `--platform kimi`。`KIMI_CODE_HOME` 可覆盖 Kimi home。
+默认平台是 `codex`；使用其他平台时显式传 `--platform claude`、`--platform kimi`、`--platform omp` 或 `--platform grok`。`KIMI_CODE_HOME` 可覆盖 Kimi home；`PI_CODING_AGENT_DIR` 覆盖 OMP agent home，`PI_CODING_AGENT_SESSION_DIR` 单独覆盖会话根目录；`OMP_PROFILE`（或旧名 `PI_PROFILE`）选择 `~/.omp/profiles/<name>/agent`；`GROK_HOME` 是 Grok home 的唯一覆盖项。
 
 Kimi 的项目归属只信会话 `state.json.workDir`。state 缺失、损坏或没有 `workDir` 时，该会话不归入任何项目桶；绝不猜测或反解生成的 `wd_` 目录名。决策依据见 [ADR 001](./skills/retrace/references/adr-001-kimi-project-attribution.md)。
+
+OMP 的项目归属只信各 JSONL `session` 头中的 `cwd`，不反解 OMP 自己的会话目录名。assistant 消息里的 `content[].type=toolCall` 与 `role=toolResult` 会拆成独立工具事件，并保留 `read`、`bash`、`task` 等小写原生工具名。
+
+Grok CLI 的项目归属只信会话 `summary.json` 的 `info.cwd`。summary 缺失、损坏或没有 `info.cwd` 时，先回退到对 percent-encoding 的分组目录名做 URL-decode，再回退到长路径被 slug 时 CLI 写入的 `.cwd` 文件；绝不对 Grok 目录名套用 Codex 式 `-` 解码。被索引的是 append-only 的 `updates.jsonl` ACP 事件流，同目录的 `chat_history.jsonl` 不索引。工具事件保留 Grok 原生工具名，例如 `run_terminal_command`。决策依据见 [ADR 002](./skills/retrace/references/adr-002-grok-project-attribution.md)。
 
 ### 路径编码
 
@@ -34,7 +40,7 @@ Unix 路径会去掉开头的 `/`，再把路径分隔符替换成 `-`：
 
 `/home/user/example-project` -> `home-user-example-project`。
 
-由于真实路径也可能包含连字符，反向解码是尽力而为的；Codex 使用 `session_meta.payload.cwd`，Kimi 使用 `state.json.workDir` 恢复原始路径。
+由于真实路径也可能包含连字符，反向解码是尽力而为的；Codex 使用 `session_meta.payload.cwd`，Kimi 使用 `state.json.workDir`，OMP 使用 session 头的 `cwd` 恢复原始路径。
 
 ## 目录结构
 
@@ -48,7 +54,9 @@ poly-retrace/
 |   |   |-- common.py             # 共享数据模型
 |   |   |-- codex.py              # Codex 路径与解析
 |   |   |-- claude.py             # Claude Code 路径与解析
+|   |   |-- grok.py               # Grok 路径、summary 与 updates.jsonl 解析
 |   |   |-- kimi.py               # Kimi 路径、state 与 Wire 解析
+|   |   |-- omp.py                # OMP 路径、session 头与消息/工具解析
 |   |-- retrace-index.py          # 建立 / 刷新 FTS 索引
 |   |-- retrace-search.py         # 搜索（FTS 或混合）
 |   |-- retrace-locate.py         # 定位会话文件
@@ -93,6 +101,12 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 # Kimi Code（包含 main 与全部子代理 Wire 文件）
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 
+# OMP
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
+
+# Grok CLI（索引 updates.jsonl ACP 事件流）
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
+
 # 查看统计
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -101,6 +115,8 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform codex --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform claude --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -120,6 +136,12 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 
 # 按 Kimi 原生工具名过滤
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
+
+# 按 OMP 原生小写工具名过滤
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform omp "command" --type tool_use --tool bash --project poly-retrace
+
+# 按 Grok 原生工具名过滤
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform grok "command" --type tool_use --tool run_terminal_command --project poly-retrace
 
 # 按结果 id 查看上下文
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --context <id> --before 5 --after 5 --project poly-retrace
@@ -151,7 +173,7 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 |--------------|------------------------------------------------------------------|
 | `--type`     | `session_meta`, `turn_context`, `user`, `assistant`, `tool_use`, `tool_result` |
 | `--role`     | `user`, `assistant`, `tool`                                      |
-| `--tool`     | 平台原生名：`shell_command`、`apply_patch`、`Bash`、`Read`、`Skill` |
+| `--tool`     | 平台原生名：`shell_command`、`apply_patch`、`Bash`、`Read`、`Skill`、`bash`、`read`、`task`、`run_terminal_command` |
 | `--project`  | 项目名或编码后路径片段                                           |
 | `--session`  | 会话 UUID                                                        |
 | `--since`    | ISO 起始日期                                                     |
@@ -163,9 +185,15 @@ AI 摘要和分析会调用 `codex exec`，默认不绕过沙箱与审批检查�
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --list --project poly-retrace --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform omp --session-id <uuid-or-prefix> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform grok --session-id <uuid> --json
 ```
 
 Kimi 的定位结果会把 main Wire 文件排在首位，并返回全部子代理 Wire 文件。
+
+OMP 可使用完整 session ID 或唯一前缀；项目路径来自 session 头，不依赖源目录名。
+
+Grok 的 session ID 就是 UUIDv7 会话目录名；定位返回该会话的 `updates.jsonl`，项目路径来自 `summary.json` 的 `info.cwd`。
 
 ## AI 分析
 
@@ -183,6 +211,8 @@ Kimi 的定位结果会把 main Wire 文件排在首位，并返回全部子代�
 ```powershell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform omp --session <uuid-or-prefix> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform grok --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -204,10 +234,14 @@ Chronicle 会保留：代码片段、shell / git / npm 命令、涉及的文件�
 
 | 问题                                | 解决方法                                                                                     |
 |-------------------------------------|----------------------------------------------------------------------------------------------|
-| 提示“索引数据库不存在”              | 运行 `retrace-index.py --auto --platform <codex|claude|kimi> --project <name> --no-summary`。 |
+| 提示“索引数据库不存在”              | 运行 `retrace-index.py --auto --platform <codex|claude|kimi|omp|grok> --project <name> --no-summary`。 |
 | 搜不到结果                          | 检查 `--project` 过滤，放宽关键词，然后用 `--hybrid` 重试。                                  |
 | Kimi 会话未被归属                   | 检查 `state.json` 是否有效且含 `workDir`；不会从 `wd_` 猜测。                                |
 | Kimi `--tool` 搜不到                | 使用 Kimi 原生工具名，例如 `Bash`、`Read`、`Skill`。                                         |
+| 找不到 OMP 会话                     | 检查 `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`；自定义 `--session-dir` 要通过后者暴露给 Retrace。 |
+| OMP `--tool` 搜不到                 | 使用 OMP 原生小写工具名，例如 `bash`、`read`、`task`。                                       |
+| Grok 会话未被归属                   | 检查 `summary.json` 是否有效且含 `info.cwd`；URL-decode 分组目录名与 `.cwd` 文件只是回退。   |
+| Grok `--tool` 搜不到                | 使用 Grok 原生工具名，例如 `run_terminal_command`。                                          |
 | 查询含 `-` 时 FTS 报错              | 升级到当前脚本；遇到非单词字符时会自动加引号。                                               |
 | 控制台输出乱码                      | 使用 PowerShell 7 运行；脚本也会强制 UTF-8 stdio。                                           |
 | analyze / chronicle 输出为空        | 检查文件路径，先确认 search 能命中记录。                                                     |

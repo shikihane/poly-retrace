@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from retrace_paths import configure_utf8_stdio, get_platforms
+from retrace_paths import SUPPORTED_PLATFORMS, configure_utf8_stdio, get_platforms
 
 configure_utf8_stdio()
 
@@ -102,7 +102,7 @@ def main():
     parser.add_argument("--project", help="项目名称（部分匹配，必填，除非使用 --all）")
     parser.add_argument("--all", action="store_true", help="清理所有项目的索引")
     parser.add_argument("--dry-run", action="store_true", help="预览但不删除")
-    parser.add_argument("--platform", choices=["codex", "claude"], required=True,
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True,
                         help="会话平台")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 

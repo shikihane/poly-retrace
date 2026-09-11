@@ -67,6 +67,8 @@ def main() -> int:
         "validate-skill.py",
         "validate-skill.ps1",
         "platforms/kimi.py",
+        "platforms/omp.py",
+        "platforms/grok.py",
     ):
         check_file(SCRIPT_DIR / name, name, errors)
 

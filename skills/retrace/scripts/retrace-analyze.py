@@ -22,7 +22,7 @@ from retrace_common import (
     search, get_data_size, call_analysis_model, chunk_by_size,
     SINGLE_CHUNK_BYTES, MAX_BYTES_PER_CHUNK, MAX_PARALLEL
 )
-from retrace_paths import configure_utf8_stdio
+from retrace_paths import SUPPORTED_PLATFORMS, configure_utf8_stdio
 
 configure_utf8_stdio()
 
@@ -112,7 +112,7 @@ def main():
     parser.add_argument("query", help="搜索关键词")
     parser.add_argument("--prompt", "-p", default="analyze and summarize", help="分析任务")
     parser.add_argument("--project", help="项目名过滤")
-    parser.add_argument("--platform", choices=["codex", "claude"], default="codex",
+    parser.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="codex",
                         help="会话平台")
     parser.add_argument("--json", action="store_true", help="JSON输出")
     parser.add_argument("--version", "-v", action="version", version=f"retrace-analyze {VERSION}")
