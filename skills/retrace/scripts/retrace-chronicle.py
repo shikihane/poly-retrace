@@ -35,6 +35,7 @@ from retrace_paths import (
     iter_session_files,
 )
 from platforms import grok as grok_platform
+from platforms import dsh as dsh_platform
 from platforms import kimi as kimi_platform
 from platforms import omp as omp_platform
 
@@ -65,6 +66,15 @@ def find_project_dir(project_name: str, platform: str = "codex") -> Optional[Pat
 
 def find_session_file(session_uuid: str, project_name: str, platform: str = "codex") -> Optional[Path]:
     """根据 session UUID 查找 JSONL 文件"""
+    if platform == "dsh":
+        files = find_session_files(session_uuid, "dsh")
+        if not files:
+            return None
+        anchor = files[0]
+        cwd = dsh_platform.project_cwd(anchor)
+        if not project_name or (cwd and project_name.lower() in encode_path(cwd).lower()):
+            return anchor
+        return None
     if platform == "omp":
         groups = omp_platform.matching_session_groups(
             session_uuid, iter_session_files("omp")
@@ -121,6 +131,18 @@ def find_session_file(session_uuid: str, project_name: str, platform: str = "cod
 
 def read_session_file(path: Path) -> List[Dict]:
     """读取 JSONL 文件中的所有消息（完整内容）"""
+    if dsh_platform.is_session_file(path):
+        header = dsh_platform.read_header(path)
+        messages = []
+        tool_names = {}
+        with dsh_platform.open_binary(path) as stream:
+            for line_no, line in enumerate(stream, 1):
+                if not line.endswith(b"\n"):
+                    break
+                normalized = dsh_platform.normalize_record(json.loads(line), header, tool_names)
+                if normalized and normalized["msg_type"] != "session_meta":
+                    messages.append(_normalized_chronicle_message(normalized, line_no))
+        return messages
     messages = []
     is_kimi = kimi_platform.session_dir_for_wire(path) is not None
     is_omp = not is_kimi and omp_platform.is_session_file(path)
@@ -735,7 +757,7 @@ def main():
             sys.exit(1)
         session_files = (
             find_session_files(args.session, args.platform)
-            if args.platform in {"kimi", "omp", "grok"}
+            if args.platform in {"kimi", "omp", "grok", "dsh"}
             else [session_file]
         )
 

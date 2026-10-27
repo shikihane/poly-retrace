@@ -2,7 +2,7 @@
 
 ## Overview
 
-Retrace indexes Codex, Claude Code, Kimi Code, Oh My Pi (OMP), and Grok CLI session
+Retrace indexes Codex, Claude Code, Kimi Code, Oh My Pi (OMP), Grok CLI, and DeepSeek Harness (DSH) session
 history into separate per-platform, per-project SQLite databases. Search uses FTS5 with
 BM25 ranking and a selective trigram index for mixed Chinese, code, path, and log queries.
 
@@ -14,6 +14,7 @@ BM25 ranking and a selective trigram index for mixed Chinese, code, path, and lo
 | Claude Code | `~/.claude/projects/<encoded-cwd>/**/*.jsonl` | `~/.claude/projects/<encoded-cwd>/retrace-index.db` |
 | Kimi Code | `~/.kimi-code/sessions/*/session_*/agents/*/wire.jsonl` | `~/.kimi-code/projects/<encoded-cwd>/retrace-index.db` |
 | OMP | `~/.omp/agent/sessions/**/*.jsonl` | `~/.omp/agent/projects/<encoded-cwd>/retrace-index.db` |
+| DSH | `~/.dsh/sessions/*/*/session.v4.jsonl[.zstd]` | `~/.dsh/projects/<encoded-cwd>/retrace-index.db` |
 | Grok CLI | `~/.grok/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl` | `~/.grok/projects/<encoded-cwd>/retrace-index.db` |
 
 `CODEX_HOME`, `CLAUDE_HOME`, and `KIMI_CODE_HOME` override the corresponding defaults.
@@ -21,7 +22,7 @@ BM25 ranking and a selective trigram index for mixed Chinese, code, path, and lo
 `PI_CODING_AGENT_SESSION_DIR` overrides only the OMP session root.
 `OMP_PROFILE` takes precedence over legacy `PI_PROFILE` and selects
 `~/.omp/profiles/<name>/agent` when no explicit session-root override is set.
-`GROK_HOME` is the only override for the Grok home.
+`GROK_HOME` is the only override for the Grok home. `DSH_HOME` overrides the DSH home.
 Indexes from different platforms must not share a project directory.
 
 Kimi's project bucket is derived only from `state.json.workDir`. Retrace does not parse
@@ -55,11 +56,12 @@ attach nested task/advisor transcripts as their `files`; Chronicle merges that f
 - `platforms/grok.py` owns Grok traversal, `summary.json`/`info.cwd` attribution with
   URL-decode and `.cwd` fallbacks, `updates.jsonl` ACP session-update normalization,
   session IDs, and epoch-second timestamps.
+- `platforms/dsh.py` owns V4 generation selection, Zstandard/plaintext decoding, header attribution, native session IDs, subagent lineage, and event normalization.
 - `retrace_paths.py` is the compatibility facade used by runtime scripts.
 
 The default platform is Codex. Index, search, locate, chronicle, and search-backed analyze
-accept Kimi, OMP, and Grok. Analyze still shells out through `codex exec`; there is no
-Kimi-, OMP-, or Grok-native analysis backend.
+accept Kimi, OMP, Grok, and DSH. Analyze still shells out through `codex exec`; there is no
+Kimi-, OMP-, Grok-, or DSH-native analysis backend.
 Select this adapter explicitly with `--platform omp`; use `--platform grok` for the Grok adapter.
 
 ## Unified Message Model
@@ -103,6 +105,15 @@ Grok `updates.jsonl` mapping is also selective:
   rather than an OMP-style fingerprint. Subagent sessions are ordinary sessions in the
   same tree and need no special handling.
 
+DSH V4 mapping and offsets:
+
+- Header `cwd` alone determines project attribution. Select one latest generation per session; refuse unsupported versions and ambiguous plaintext/compressed copies.
+- `user/message` and `assistant/message` contribute text only. Standalone `tool/call` and `tool/result` retain native names and pair through call IDs. Embedded streams, tool-call blocks, and reasoning are skipped.
+- Header and `session/title` events become `session_meta`. Times are Unix milliseconds.
+- Each physical session keeps its native ID. Exact-ID locate/chronicle include subagent descendants via `parentSession` and `origin=subagent`; forks remain independent. Locate lists root sessions with attached child files.
+- Source offsets refer to decompressed JSONL bytes. Unchanged files are skipped by size/mtime; changed files are decoded and the indexed prefix is hashed before appending. A rewritten prefix rebuilds that source, including both FTS indexes. Incomplete JSONL rows wait for the next update.
+- Python 3.14+ uses standard-library Zstandard; older Python requires `zstandard`. Changed compressed logs are decoded from the beginning; no frame checkpoint cache is maintained.
+
 ## Supported Operations
 
 | Operation | Tool | Description |
@@ -115,7 +126,7 @@ Grok `updates.jsonl` mapping is also selective:
 | Recover | `retrace-recover.py` | Restore file versions from supported histories |
 
 Recover intentionally supports only Codex and Claude histories; like Kimi and OMP,
-Grok sessions are out of scope for recovery.
+Grok and DSH sessions are out of scope for recovery.
 
 ## Token Budget Control
 

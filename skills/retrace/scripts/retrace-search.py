@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from retrace_paths import SUPPORTED_PLATFORMS, configure_utf8_stdio, get_platform, get_platforms
+from platforms import dsh as dsh_platform
 
 configure_utf8_stdio()
 
@@ -541,10 +542,17 @@ def get_full_content(conn: sqlite3.Connection, msg_id: int) -> dict:
 
     # 读取原始内容
     try:
-        with open(session_file, 'rb') as f:
+        with dsh_platform.open_binary(Path(session_file)) as f:
             f.seek(offset)
             raw = f.read(length)
             data = json.loads(raw.decode('utf-8'))
+        content = data.get("message", {}).get("content", preview)
+        if dsh_platform.is_session_file(Path(session_file)):
+            normalized = dsh_platform.normalize_record(
+                data, dsh_platform.read_header(Path(session_file)), {}
+            )
+            if normalized:
+                content = normalized["search_text"]
     except Exception as e:
         return {
             "id": msg_id,
@@ -562,7 +570,7 @@ def get_full_content(conn: sqlite3.Connection, msg_id: int) -> dict:
         "type": mtype,
         "role": role,
         "tool": tool,
-        "content": data.get("message", {}).get("content", preview),
+        "content": content,
         "raw": data
     }
 
@@ -783,7 +791,7 @@ def main():
                 db_platforms[path] = platform.name
         if not db_paths:
             print("❌ 没有找到索引数据库", file=sys.stderr)
-            print("   请先运行: python retrace-index.py --auto --platform codex|claude|kimi|omp|grok", file=sys.stderr)
+            print("   请先运行: python retrace-index.py --auto --platform codex|claude|kimi|omp|grok|dsh", file=sys.stderr)
             sys.exit(1)
 
     # 验证数据库存在

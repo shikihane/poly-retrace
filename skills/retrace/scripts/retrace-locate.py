@@ -38,6 +38,7 @@ from retrace_paths import (
     read_first_json_record,
 )
 from platforms import grok as grok_platform
+from platforms import dsh as dsh_platform
 from platforms import kimi as kimi_platform
 from platforms import omp as omp_platform
 
@@ -108,6 +109,8 @@ def get_codex_session_meta(session_file: Path) -> Dict:
 
 def get_session_cwd(session_file: Path, platform: str = "codex") -> str:
     """Return the cwd recorded by a session file when available."""
+    if platform == "dsh":
+        return dsh_platform.project_cwd(session_file)
     if platform == "kimi":
         return kimi_platform.read_session_state(session_file).get("workDir", "")
     if platform == "omp":
@@ -171,7 +174,7 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
                 cwd = get_session_cwd(platform_file, retrace_platform.name)
                 if cwd:
                     project_name = encode_path(cwd)
-                elif retrace_platform.name in {"kimi", "omp", "grok"}:
+                elif retrace_platform.name in {"kimi", "omp", "grok", "dsh"}:
                     project_name = None
                 else:
                     project_name = platform_file.relative_to(retrace_platform.projects_dir).parts[0]
@@ -197,6 +200,25 @@ def locate_session(cwd: str = None, session_id: str = None, platform: str = "cod
                 if session_file:
                     return _build_result(session_id, session_file, project_dir, platform)
         return {"error": f"找不到会话: {session_id}"}
+
+    if platform == "dsh":
+        requested_cwd = encode_path(cwd or os.getcwd()).casefold()
+        matches = [
+            path for path in iter_session_files("dsh")
+            if dsh_platform.read_header(path).get("origin") != "subagent"
+            and dsh_platform.project_cwd(path)
+            and encode_path(dsh_platform.project_cwd(path)).casefold() == requested_cwd
+        ]
+        if not matches:
+            return {"error": f"找不到 DSH 项目会话: {cwd or os.getcwd()}"}
+        session_file = max(matches, key=lambda path: path.stat().st_mtime_ns)
+        session_id = dsh_platform.session_id_for_file(session_file)
+        result = _build_result(
+            session_id, session_file, projects_dir / encode_path(dsh_platform.project_cwd(session_file)),
+            "dsh", find_session_files(session_id, "dsh"),
+        )
+        result["platform"] = "dsh"
+        return result
 
     if platform == "omp":
         requested_cwd = cwd or os.getcwd()
@@ -323,6 +345,11 @@ def list_projects(platform: str = "codex") -> List[Dict]:
 
         for session_file in iter_session_files(retrace_platform.name):
             if (
+                retrace_platform.name == "dsh"
+                and dsh_platform.read_header(session_file).get("origin") == "subagent"
+            ):
+                continue
+            if (
                 retrace_platform.name == "omp"
                 and not omp_platform.is_root_session_file(session_file)
             ):
@@ -361,10 +388,14 @@ def list_projects(platform: str = "codex") -> List[Dict]:
                 if retrace_platform.name == "omp"
                 else [session_file]
             )
+            if retrace_platform.name == "dsh":
+                display_files = find_session_files(dsh_platform.session_id_for_file(session_file), "dsh")
             if retrace_platform.name == "kimi":
                 logical_session_id = kimi_platform.session_id_for_wire(session_file)
             elif retrace_platform.name == "grok":
                 logical_session_id = grok_platform.session_id_for_file(session_file)
+            elif retrace_platform.name == "dsh":
+                logical_session_id = dsh_platform.session_id_for_file(session_file)
             elif retrace_platform.name == "omp":
                 logical_session_id = (
                     omp_platform.session_id_for_file(session_file)
@@ -417,6 +448,28 @@ def list_projects(platform: str = "codex") -> List[Dict]:
 def list_sessions(project_name: str, platform: str = "codex") -> List[Dict]:
     """列出项目的所有会话（含摘要）"""
     projects_dir = get_projects_dir(platform)
+
+    if platform == "dsh":
+        sessions = []
+        files = list(iter_session_files("dsh"))
+        for path in files:
+            header = dsh_platform.read_header(path)
+            cwd = header.get("cwd", "")
+            if header.get("origin") == "subagent" or not cwd:
+                continue
+            bucket = encode_path(cwd)
+            if project_name.lower() not in bucket.lower():
+                continue
+            family = dsh_platform.session_family_files(header["id"], files)
+            info = get_session_summaries(projects_dir / bucket).get(header["id"], {})
+            sessions.append({
+                "session_id": header["id"], "file": str(path),
+                "files": [str(item) for item in family],
+                "size": sum(item.stat().st_size for item in family),
+                "modified": datetime.fromtimestamp(max(item.stat().st_mtime for item in family)).isoformat(),
+                "message_count": info.get("message_count"), "summary": info.get("summary"),
+            })
+        return sorted(sessions, key=lambda item: item["modified"], reverse=True)
 
     if platform == "kimi":
         grouped: Dict[tuple[str, str], List[Path]] = {}

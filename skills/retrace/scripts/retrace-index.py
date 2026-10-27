@@ -42,6 +42,7 @@ from retrace_paths import (
 )
 from platforms import kimi as kimi_platform
 from platforms import grok as grok_platform
+from platforms import dsh as dsh_platform
 from platforms import omp as omp_platform
 
 configure_utf8_stdio()
@@ -871,9 +872,71 @@ def _drop_indexed_source(
     cursor.execute("DELETE FROM meta WHERE key = ?", (f"fingerprint:{session_file}",))
 
 
+def index_dsh_file(conn: sqlite3.Connection, session_file: str, incremental: bool) -> tuple:
+    """Index complete V4 rows using decompressed offsets and a verified prefix."""
+    path = Path(session_file)
+    header = dsh_platform.read_header(path)
+    stat = path.stat()
+    revision = [stat.st_size, stat.st_mtime_ns]
+    key = f"fingerprint:{session_file}"
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    previous = json.loads(row[0]) if row and incremental else {}
+    if previous.get("revision") == revision:
+        return 0, set()
+    # shortcut: changed compressed files are decoded from the start; add frame checkpoints
+    # if large live sessions make verified prefix scans too costly.
+    with dsh_platform.open_binary(path) as stream:
+        raw = stream.read()
+    after = path.stat()
+    if [after.st_size, after.st_mtime_ns] != revision:
+        raise RuntimeError(f"DSH session changed while reading; retry indexing: {path}")
+    if json.loads(raw.split(b"\n", 1)[0]) != header:
+        raise RuntimeError(f"DSH session header changed while reading; retry indexing: {path}")
+    end = raw.rfind(b"\n") + 1
+    start = previous.get("offset", 0)
+    append_only = bool(previous) and start <= end and hashlib.sha256(
+        raw[:start]
+    ).hexdigest() == previous.get("prefix")
+    count = 0
+    tool_names = {}
+    with conn:
+        cursor = conn.cursor()
+        if not append_only:
+            _drop_indexed_source(conn, cursor, session_file)
+            start = 0
+        # A generation/encoding change must not leave an older source indexed too.
+        old_sources = cursor.execute(
+            "SELECT DISTINCT session_file FROM messages WHERE session_id = ? AND session_file != ?",
+            (header["id"], session_file),
+        ).fetchall()
+        for (source,) in old_sources:
+            _drop_indexed_source(conn, cursor, source)
+        offset = 0
+        for line_no, line in enumerate(raw[:end].splitlines(keepends=True), 1):
+            record = json.loads(line)
+            normalized = dsh_platform.normalize_record(record, header, tool_names)
+            if offset >= start and normalized:
+                if insert_normalized_message(
+                    conn, cursor, session_file, line_no, offset, len(line), normalized
+                ):
+                    count += 1
+            offset += len(line)
+        fingerprint = {
+            "revision": revision, "offset": end,
+            "prefix": hashlib.sha256(raw[:end]).hexdigest(),
+        }
+        cursor.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, json.dumps(fingerprint)),
+        )
+    return count, {header["id"]}
+
+
 def index_session_file(conn: sqlite3.Connection, session_file: str,
                        incremental: bool = True, platform_name: str = None) -> tuple:
     """索引单个会话文件，返回 (新索引消息数, 会话ID集合)"""
+    if platform_name == "dsh" or dsh_platform.is_session_file(Path(session_file)):
+        return index_dsh_file(conn, session_file, incremental)
     cursor = conn.cursor()
 
     # 获取上次索引位置
@@ -1345,6 +1408,9 @@ def index_single_project(project_dir: Path, incremental: bool = True,
 
 def detect_session_project(session_file: Path, platform: RetracePlatform) -> Optional[str]:
     """Read a session file and return its encoded project bucket."""
+    if platform.name == "dsh":
+        cwd = dsh_platform.project_cwd(session_file)
+        return encode_path(cwd) if cwd else None
     if platform.name == "claude":
         try:
             return session_file.relative_to(platform.projects_dir).parts[0]

@@ -14,13 +14,14 @@ from typing import Iterable, Optional
 
 from platforms import claude as claude_platform
 from platforms import codex as codex_platform
+from platforms import dsh as dsh_platform
 from platforms import grok as grok_platform
 from platforms import kimi as kimi_platform
 from platforms import omp as omp_platform
 from platforms.common import RetracePlatform
 
 
-SUPPORTED_PLATFORMS = ("codex", "claude", "kimi", "omp", "grok")
+SUPPORTED_PLATFORMS = ("codex", "claude", "kimi", "omp", "grok", "dsh")
 
 
 def configure_utf8_stdio() -> None:
@@ -43,6 +44,8 @@ def get_platform(platform: str = "codex") -> RetracePlatform:
         return omp_platform.create_platform()
     if platform == "grok":
         return grok_platform.create_platform()
+    if platform == "dsh":
+        return dsh_platform.create_platform()
     raise ValueError(f"unknown platform: {platform}")
 
 
@@ -82,6 +85,11 @@ def encode_path(path: str) -> str:
 def decode_path(encoded: str, platform: str = "codex") -> str:
     """Best-effort decode for retrace project bucket names."""
     for session_file in iter_session_files(platform):
+        if platform == "dsh":
+            cwd = dsh_platform.project_cwd(session_file)
+            if cwd and encode_path(cwd) == encoded:
+                return cwd
+            continue
         if platform == "kimi":
             cwd = kimi_platform.read_session_state(session_file).get("workDir", "")
             if cwd and encode_path(cwd) == encoded:
@@ -213,6 +221,8 @@ def session_file_agent_id(session_file: Path, max_records: int = 5) -> str:
 
 def find_session_files(session_id: str, platform: str = "codex") -> list[Path]:
     """Return all files that belong to a logical session id."""
+    if platform == "dsh":
+        return dsh_platform.session_family_files(session_id, iter_session_files("dsh"))
     if platform == "kimi":
         requested = session_id.removeprefix("session_")
         matches = [

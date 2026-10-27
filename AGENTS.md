@@ -1,10 +1,10 @@
 # AGENTS.md - Poly-Retrace Skill
 
-Codex, Claude Code, Kimi Code, Oh My Pi (OMP), and Grok CLI session history search and analysis skill.
+Codex, Claude Code, Kimi Code, Oh My Pi (OMP), Grok CLI, and DeepSeek Harness (DSH) session history search and analysis skill.
 
 ## Overview
 
-Poly-retrace searches and analyzes Codex, Claude Code, Kimi Code, OMP, or Grok CLI conversation history using SQLite FTS with BM25 ranking.
+Poly-retrace searches and analyzes Codex, Claude Code, Kimi Code, OMP, Grok CLI, or DeepSeek Harness (DSH) conversation history using SQLite FTS with BM25 ranking.
 
 ## Architecture
 
@@ -19,6 +19,7 @@ poly-retrace/
 │           │   ├── common.py
 │           │   ├── codex.py
 │           │   ├── claude.py
+│           │   ├── dsh.py
 │           │   ├── grok.py
 │           │   ├── kimi.py
 │           │   └── omp.py
@@ -97,6 +98,9 @@ Always choose a platform explicitly when you do not want the Codex default:
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
+
+# DeepSeek Harness (DSH, V4)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform dsh --project poly-retrace --no-summary
 ```
 
 Use `--no-summary` for routine local indexing. AI summary and analysis paths call `codex exec`.
@@ -113,9 +117,12 @@ AI summary and analysis commands run without bypassing sandbox/approval checks b
 | Claude Code | `$HOME\.claude\projects\<encoded-cwd>\*.jsonl` | `$HOME\.claude\projects\<encoded-cwd>\retrace-index.db` |
 | Kimi Code | `$env:KIMI_CODE_HOME\sessions\*\session_*\agents\*\wire.jsonl` (default home `$HOME\.kimi-code`) | `$env:KIMI_CODE_HOME\projects\<encoded-cwd>\retrace-index.db` |
 | OMP | `$env:PI_CODING_AGENT_SESSION_DIR\**\*.jsonl` or `$HOME\.omp\agent\sessions\**\*.jsonl` | `$env:PI_CODING_AGENT_DIR\projects\<encoded-cwd>\retrace-index.db` (default `$HOME\.omp\agent`) |
+| DSH | `$env:DSH_HOME\sessions\*\*\session.v4.jsonl[.zstd]` (default home `$HOME\.dsh`) | `$env:DSH_HOME\projects\<encoded-cwd>\retrace-index.db` |
 | Grok CLI | `$env:GROK_HOME\sessions\*\<session-id>\updates.jsonl` (default home `$HOME\.grok`) | `$env:GROK_HOME\projects\<encoded-cwd>\retrace-index.db` |
 
 Each platform keeps its own project index root. Do not mix indexes from different platforms in the same directory. `KIMI_CODE_HOME` overrides the Kimi home. `PI_CODING_AGENT_DIR` overrides the OMP agent home, `PI_CODING_AGENT_SESSION_DIR` overrides only its session root, and `OMP_PROFILE` (or `PI_PROFILE`) selects the named profile home. `GROK_HOME` is the only override for the Grok home.
+
+DSH V4 supports `session.v4.jsonl` and `session.v4.jsonl.zstd`. `DSH_HOME` overrides the default `~/.dsh` home. Read `cwd` and the native session ID from the header, never from the project/session directory name. Missing `cwd` means no project attribution. Select only the latest generation; older and unknown versions are rejected. Exact-ID locate and chronicle include descendants whose headers have `origin=subagent` and `parentSession`; ordinary forks stay separate. Each physical session retains its native searchable ID. Zstandard needs Python 3.14+ or `python -m pip install zstandard`. Recover remains limited to Codex and Claude.
 
 ### Path Encoding
 
@@ -141,6 +148,9 @@ Grok project attribution and decoding use only the session's `summary.json` `inf
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
+
+# DeepSeek Harness (DSH, V4)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform dsh --project poly-retrace --no-summary
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats
 ```
 
@@ -155,6 +165,9 @@ Grok project attribution and decoding use only the session's `summary.json` `inf
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi "command" --type tool_use --tool Bash --session <uuid> --since 2026-01-01 --until 2027-01-01 --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform omp "command" --type tool_use --tool bash --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform grok "command" --type tool_use --tool run_terminal_command --project poly-retrace
+
+# DeepSeek Harness (DSH, V4)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform dsh "command" --type tool_use --tool pwsh --project poly-retrace
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --context <id> --before 5 --after 5
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --full <id>
 ```
@@ -168,6 +181,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform omp --session-id <uuid-or-prefix> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform grok --session-id <uuid> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform dsh --session-id <uuid> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform codex --list
 ```
 
@@ -185,6 +199,7 @@ Use `--hybrid` proactively for mixed Chinese/code/log queries such as `录音确
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform omp --session <uuid-or-prefix> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform grok --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform dsh --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 

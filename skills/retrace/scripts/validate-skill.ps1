@@ -71,6 +71,7 @@ foreach ($name in @(
 Test-RequiredFile (Join-Path $PSScriptRoot "platforms\kimi.py")
 Test-RequiredFile (Join-Path $PSScriptRoot "platforms\omp.py")
 Test-RequiredFile (Join-Path $PSScriptRoot "platforms\grok.py")
+Test-RequiredFile (Join-Path $PSScriptRoot "platforms\dsh.py")
 
 Write-Host ""
 Write-Host "=== Validation Summary ==="

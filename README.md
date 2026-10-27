@@ -1,12 +1,12 @@
 # poly-retrace
 
-Search and analyze Codex, Claude Code, Kimi Code, Oh My Pi (OMP), and Grok CLI conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
+Search and analyze Codex, Claude Code, Kimi Code, Oh My Pi (OMP), Grok CLI, and DeepSeek Harness (DSH) conversation history with SQLite FTS full-text search, BM25 ranking, and AI-powered summaries.
 
 Chinese version: [README_CN.md](./README_CN.md).
 
 ## What it does
 
-- Indexes Codex, Claude Code, OMP, and Grok CLI session JSONL plus Kimi Wire files into per-project SQLite databases.
+- Indexes Codex, Claude Code, OMP, Grok CLI, and DSH session logs plus Kimi Wire files into per-project SQLite databases.
 - Full-text search with BM25 ranking, plus a hybrid trigram mode for Chinese, paths, hyphenated names, and pasted log fragments.
 - Layered search output (`stats` -> `list` -> `detail` -> `full`) to keep token budgets under control.
 - Single-session chronicle extraction to TOON / JSON for handoff or memory.
@@ -20,15 +20,18 @@ Chinese version: [README_CN.md](./README_CN.md).
 - Kimi Code sessions: `%KIMI_CODE_HOME%\sessions\*\session_*\agents\*\wire.jsonl` / `$KIMI_CODE_HOME/sessions/*/session_*/agents/*/wire.jsonl`; default home is `~/.kimi-code`.
 - OMP sessions: `%PI_CODING_AGENT_SESSION_DIR%\**\*.jsonl` / `$PI_CODING_AGENT_SESSION_DIR/**/*.jsonl`, or `~/.omp/agent/sessions/**/*.jsonl` by default.
 - Grok CLI sessions: `%GROK_HOME%\sessions\<url-encoded-cwd>\<session-id>\updates.jsonl` / `$GROK_HOME/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl`; default home is `~/.grok`.
+- DeepSeek Harness (DSH) sessions: `$DSH_HOME/sessions/<project>/<session-id>/session.v4.jsonl.zstd`, or the plaintext `session.v4.jsonl`; default home is `~/.dsh`.
 - Indexes live under each platform home at `projects/<encoded-cwd>/retrace-index.db`.
 
-The default platform is `codex`. Pass `--platform claude`, `--platform kimi`, `--platform omp`, or `--platform grok` for other platforms. `KIMI_CODE_HOME` overrides the Kimi home. `PI_CODING_AGENT_DIR` overrides the OMP agent home; `PI_CODING_AGENT_SESSION_DIR` overrides its session root. `OMP_PROFILE` (or legacy `PI_PROFILE`) selects `~/.omp/profiles/<name>/agent`. `GROK_HOME` is the only override for the Grok home.
+The default platform is `codex`. Pass `--platform claude`, `--platform kimi`, `--platform omp`, `--platform grok`, or `--platform dsh` for other platforms. `KIMI_CODE_HOME` overrides the Kimi home. `PI_CODING_AGENT_DIR` overrides the OMP agent home; `PI_CODING_AGENT_SESSION_DIR` overrides its session root. `OMP_PROFILE` (or legacy `PI_PROFILE`) selects `~/.omp/profiles/<name>/agent`. `GROK_HOME` is the only override for the Grok home.
 
 Kimi project attribution comes only from each session's `state.json.workDir`. A missing or invalid state file leaves the session unattributed; Retrace never guesses from the generated `wd_` directory name. See [ADR 001](./skills/retrace/references/adr-001-kimi-project-attribution.md).
 
 OMP project attribution comes only from each JSONL `session` header's `cwd`; Retrace does not decode OMP's session-directory name. Assistant `content[].type=toolCall` blocks and `role=toolResult` messages are indexed as separate tool events with native lowercase names such as `read`, `bash`, and `task`.
 
 Grok CLI project attribution comes only from each session's `summary.json` `info.cwd`. If the summary is missing or invalid, Retrace falls back to URL-decoding the percent-encoded group directory name, then to the `.cwd` file written for slugged long names; it never applies Codex-style `-` decoding to Grok's directory names. The append-only `updates.jsonl` ACP event stream is indexed; the sibling `chat_history.jsonl` is not. Tool events keep Grok's native names such as `run_terminal_command`. See [ADR 002](./skills/retrace/references/adr-002-grok-project-attribution.md).
+
+DSH supports native V4 logs in Zstandard or plaintext form. `DSH_HOME` overrides its home. Project attribution uses only the session header's `cwd`; missing `cwd` leaves the session unattributed. Locate and chronicle accept exact native session IDs and include subagent descendants through `parentSession` and `origin`; ordinary forks stay separate. Each child keeps its own searchable session ID. Older and unknown formats produce an error.
 
 ### Path encoding
 
@@ -54,6 +57,7 @@ poly-retrace/
 |   |   |-- common.py             # shared data model
 |   |   |-- codex.py              # Codex paths and parsing
 |   |   |-- claude.py             # Claude Code paths and parsing
+|   |   |-- dsh.py                # DSH V4 discovery, decompression, and event parsing
 |   |   |-- grok.py               # Grok paths, summary, and updates.jsonl parsing
 |   |   |-- kimi.py               # Kimi paths, state, and Wire parsing
 |   |   |-- omp.py                # OMP paths, headers, and message/tool parsing
@@ -83,7 +87,7 @@ RETRACE_SCRIPTS="$(pwd)/skills/retrace/scripts"
 PYTHON_CMD="python3"
 ```
 
-No external Python dependencies are required for indexing and searching; SQLite FTS5 ships with modern Python, and the scripts fall back to FTS4 if FTS5 is missing.
+SQLite FTS5 ships with modern Python, and the scripts fall back to FTS4 if FTS5 is missing. DSH compressed logs use Python 3.14+ standard-library Zstandard support; on older Python, install `zstandard` with `python -m pip install zstandard`. Plaintext logs and other platforms need no additional Python dependencies.
 
 AI summary and analysis paths shell out to `codex exec`. They do not bypass sandbox or approval checks by default. Set `RETRACE_ALLOW_UNSANDBOXED_AI=1` only in a trusted local environment if you explicitly need legacy bypass behavior.
 
@@ -107,6 +111,9 @@ Always ensure the index is current before searching.
 # Grok CLI (indexes updates.jsonl ACP event streams)
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
 
+# DeepSeek Harness (DSH, V4)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --auto --platform dsh --project poly-retrace --no-summary
+
 # Stats
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-index.py" --stats --platform codex
 ```
@@ -117,6 +124,7 @@ Always ensure the index is current before searching.
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform kimi --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform omp --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform grok --project poly-retrace --no-summary
+"$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --auto --platform dsh --project poly-retrace --no-summary
 "$PYTHON_CMD" "$RETRACE_SCRIPTS/retrace-index.py" --stats --platform codex
 ```
 
@@ -142,6 +150,9 @@ Use `--no-summary` for routine local indexing. Drop it only when you want Codex-
 
 # Filtered with Grok's native tool name
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform grok "command" --type tool_use --tool run_terminal_command --project poly-retrace
+
+# DeepSeek Harness (DSH, V4)
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform dsh "command" --type tool_use --tool pwsh --project poly-retrace
 
 # Context window around a result id
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-search.py" --platform kimi --context <id> --before 5 --after 5 --project poly-retrace
@@ -187,6 +198,7 @@ Plain FTS is still ideal for simple English / code tokens such as `pwsh`, `shell
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform kimi --list --project poly-retrace --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform omp --session-id <uuid-or-prefix> --json
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform grok --session-id <uuid> --json
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-locate.py" --platform dsh --session-id <uuid> --json
 ```
 
 Kimi locate results put the main Wire file first and include all subagent Wire files.
@@ -213,6 +225,7 @@ Single-session history extraction with strong prompt constraints. Emits TOON by 
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform kimi --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform omp --session <uuid-or-prefix> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform grok --session <uuid> --project poly-retrace --output .\chronicle.toon
+& $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform dsh --session <uuid> --project poly-retrace --output .\chronicle.toon
 & $PYTHON_CMD "$env:RETRACE_SCRIPTS\retrace-chronicle.py" --platform codex --file "$HOME\.codex\sessions\2026\05\09\<session>.jsonl" --output .\chronicle.json --json
 ```
 
@@ -234,7 +247,7 @@ Reconstruct file versions from a session when edits were not committed to git. T
 
 | Issue                              | Fix                                                                                          |
 |------------------------------------|----------------------------------------------------------------------------------------------|
-| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|kimi|omp|grok> --project <name> --no-summary`. |
+| "索引数据库不存在" / index missing   | Run `retrace-index.py --auto --platform <codex|claude|kimi|omp|grok|dsh> --project <name> --no-summary`. |
 | No results                         | Verify `--project`, broaden the query, then retry with `--hybrid`.                           |
 | Kimi session is skipped            | Verify its `state.json` exists and contains `workDir`; `wd_` is never decoded.              |
 | Kimi `--tool` finds nothing        | Use the original Kimi name such as `Bash`, `Read`, or `Skill`.                              |

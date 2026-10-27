@@ -69,6 +69,7 @@ def main() -> int:
         "platforms/kimi.py",
         "platforms/omp.py",
         "platforms/grok.py",
+        "platforms/dsh.py",
     ):
         check_file(SCRIPT_DIR / name, name, errors)
 
